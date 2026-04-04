@@ -1,4 +1,4 @@
 .maggie/
 *.image
-dorado
-demo
+/dorado
+/demo

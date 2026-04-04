@@ -13,6 +13,7 @@ import (
 	"github.com/chazu/maggie/compiler"
 	"github.com/chazu/maggie/pipeline"
 	"github.com/chazu/maggie/vm"
+	"github.com/hajimehoshi/ebiten/v2"
 )
 
 const (
@@ -20,25 +21,29 @@ const (
 	screenH = 960
 )
 
+// app holds the global application state.
+var app struct {
+	vm      *vm.VM
+	screen  *display.Form
+	wm      *display.WindowManager
+	backend *display.EbitengineBackend
+}
+
 func main() {
 	// Bootstrap the Maggie VM
 	vmInst := vm.NewVM()
 
-	// Load the base Maggie image (provides String, Array, etc.)
 	imagePath := findMaggieImage()
 	if imagePath != "" {
 		if err := vmInst.LoadImage(imagePath); err != nil {
 			log.Fatalf("Failed to load Maggie image: %v", err)
 		}
-		fmt.Printf("Loaded Maggie image from %s\n", imagePath)
 	} else {
-		fmt.Println("Warning: no Maggie image found, running without base classes")
+		fmt.Fprintln(os.Stderr, "Warning: no Maggie image found, running without base classes")
 	}
 
 	vmInst.UseGoCompiler(compiler.Compile)
-
-	// Wire up FileIn so Maggie code can load source files
-	vmInst.SetFileInFunc(func(v *vm.VM, source string, sourcePath string, nsOverride string, verbose bool) (int, error) {
+	vmInst.SetFileInFunc(func(v *vm.VM, source, sourcePath, nsOverride string, verbose bool) (int, error) {
 		p := &pipeline.Pipeline{VM: v}
 		return p.CompileSourceFile(source, sourcePath, nsOverride)
 	})
@@ -52,50 +57,48 @@ func main() {
 	backend := display.NewEbitengineBackend(screen)
 	wm := display.NewWindowManager(screen)
 
-	// Register display primitives BEFORE compiling sources
-	// so that Maggie code can reference DoradoDisplay at compile time
-	registerDisplayPrimitives(vmInst, screen, wm)
+	app.vm = vmInst
+	app.screen = screen
+	app.wm = wm
+	app.backend = backend
+
+	// Register display primitives
+	registerDisplayPrimitives(vmInst, wm)
 
 	// Load Dorado Maggie source files
-	srcDir := findSourceDir()
-	if srcDir != "" {
+	if srcDir := findSourceDir(); srcDir != "" {
 		p := &pipeline.Pipeline{VM: vmInst}
 		methods, err := p.CompilePath(srcDir + "/...")
 		if err != nil {
 			log.Fatalf("Failed to compile Dorado sources: %v", err)
 		}
-		fmt.Printf("Dorado: compiled %d methods\n", methods)
-	}
-
-	// Try to call Dorado::Main.start if it exists
-	mainClass := vmInst.Classes.Lookup("Dorado::Main")
-	if mainClass == nil {
-		mainClass = vmInst.Classes.Lookup("Main")
-	}
-	if mainClass != nil {
-		selectorID := vmInst.Selectors.Intern("start")
-		if mainClass.ClassVTable.Lookup(selectorID) != nil {
-			qualifiedName := mainClass.FullName()
-			classValue := vmInst.Symbols.SymbolValue(qualifiedName)
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Fprintf(os.Stderr, "Maggie error in Main.start: %v\n", r)
-						// Try to extract error message
-						if exc, ok := r.(interface{ Error() string }); ok {
-							fmt.Fprintf(os.Stderr, "  Detail: %s\n", exc.Error())
-						}
-					}
-				}()
-				vmInst.Send(classValue, "start", nil)
-			}()
+		if methods > 0 {
+			fmt.Printf("Dorado: compiled %d methods\n", methods)
 		}
 	}
+
+	// Run Main.start if it exists
+	runMaggieMain(vmInst)
+
+	// Create initial windows if Main.start didn't create any
+	if len(wm.Windows()) == 0 {
+		createDefaultLayout(wm)
+	}
+
+	// Wire up menus
+	wm.WorldMenuFunc = worldMenu
+	wm.WindowMenuFunc = windowMenu
 
 	colorBG := display.ColorRGB(168, 168, 168)
 
 	backend.OnUpdate = func() {
 		for _, e := range backend.PollEvents() {
+			// Handle Cmd+D (do it) and Cmd+P (print it) globally
+			if e.Type == display.EventKeyDown && !wm.HasMenu() {
+				if handleGlobalShortcut(e) {
+					continue
+				}
+			}
 			wm.HandleEvent(e)
 		}
 		wm.Composite(colorBG)
@@ -106,7 +109,219 @@ func main() {
 	}
 }
 
-// findSourceDir looks for the Dorado Maggie source directory.
+func runMaggieMain(vmInst *vm.VM) {
+	mainClass := vmInst.Classes.Lookup("Dorado::Main")
+	if mainClass == nil {
+		mainClass = vmInst.Classes.Lookup("Main")
+	}
+	if mainClass == nil {
+		return
+	}
+	selectorID := vmInst.Selectors.Intern("start")
+	if mainClass.ClassVTable.Lookup(selectorID) == nil {
+		return
+	}
+	qualifiedName := mainClass.FullName()
+	classValue := vmInst.Symbols.SymbolValue(qualifiedName)
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				transcriptWrite(fmt.Sprintf("Error in Main.start: %v", r))
+			}
+		}()
+		vmInst.Send(classValue, "start", nil)
+	}()
+}
+
+func createDefaultLayout(wm *display.WindowManager) {
+	// Transcript
+	transcript := display.NewWindow(700, 80, 500, 300, "Transcript")
+	transcript.SetEditor("Dorado started.\nReady.\n")
+	wm.AddWindow(transcript)
+
+	// Workspace
+	ws := display.NewWindow(40, 40, 600, 500, "Workspace")
+	ws.SetEditor(`"Welcome to Dorado — the ST-80 IDE for Maggie."
+"Select an expression and press Cmd+D to evaluate (Do it),"
+"or Cmd+P to evaluate and print the result (Print it)."
+
+3 + 4.
+
+42 factorial.
+
+#(1 2 3 4 5) select: [:x | x even].
+
+'Hello, ' , 'Dorado!'.
+`)
+	wm.AddWindow(ws)
+}
+
+// --- Menus ---
+
+func worldMenu(x, y int) []display.MenuItem {
+	return []display.MenuItem{
+		{Label: "New Workspace", Action: func() {
+			w := display.NewWindow(x, y, 500, 380, "Workspace")
+			w.SetEditor("")
+			app.wm.AddWindow(w)
+		}},
+		{Label: "New Transcript", Action: func() {
+			w := display.NewWindow(x, y, 500, 300, "Transcript")
+			w.SetEditor("")
+			app.wm.AddWindow(w)
+		}},
+		display.Separator(),
+		{Label: "About Dorado", Action: func() {
+			transcriptWrite("Dorado — ST-80 IDE for Maggie")
+		}},
+	}
+}
+
+func windowMenu(w *display.Window, x, y int) []display.MenuItem {
+	items := []display.MenuItem{
+		{Label: "Do it  (⌘D)", Action: func() { doIt(w) }},
+		{Label: "Print it  (⌘P)", Action: func() { printIt(w) }},
+		display.Separator(),
+		{Label: "Cut", Action: func() {
+			if w.Editor != nil {
+				w.Editor.Cut()
+				w.MarkDirty()
+			}
+		}},
+		{Label: "Copy", Action: func() {
+			if w.Editor != nil {
+				w.Editor.Copy()
+			}
+		}},
+		{Label: "Paste", Action: func() {
+			if w.Editor != nil {
+				w.Editor.Paste()
+				w.MarkDirty()
+			}
+		}},
+		display.Separator(),
+		{Label: "Select All", Action: func() {
+			if w.Editor != nil {
+				// Manually select all
+				buf := w.Editor.Buffer
+				lastLine := buf.LineCount() - 1
+				lastCol := len([]rune(buf.Line(lastLine)))
+				w.Editor.HandleClickLocal(0, 0, false)
+				w.Editor.HandleClickLocal(w.Content.Width(), w.Content.Height(), true)
+				_ = lastCol // ensure we trigger full selection
+				w.MarkDirty()
+			}
+		}},
+	}
+	return items
+}
+
+// --- Do it / Print it ---
+
+func doIt(w *display.Window) {
+	if w == nil || w.Editor == nil {
+		return
+	}
+	source := getEvalSource(w.Editor)
+	if source == "" {
+		return
+	}
+
+	_, _, err := evalExpression(app.vm, source)
+	if err != nil {
+		transcriptWrite("Error: " + err.Error())
+	}
+	w.MarkDirty()
+}
+
+func printIt(w *display.Window) {
+	if w == nil || w.Editor == nil {
+		return
+	}
+	source := getEvalSource(w.Editor)
+	if source == "" {
+		return
+	}
+
+	_, printStr, err := evalExpression(app.vm, source)
+	if err != nil {
+		transcriptWrite("Error: " + err.Error())
+		return
+	}
+
+	// Insert result after selection (or cursor)
+	te := w.Editor
+	cursor := te.Cursor()
+	te.SetCursor(cursor)
+	te.Buffer.Insert(cursor, " "+printStr)
+	w.MarkDirty()
+}
+
+// getEvalSource returns the selected text, or the current line if no selection.
+func getEvalSource(te *display.TextEditor) string {
+	sel := te.SelectedText()
+	if sel != "" {
+		return sel
+	}
+	// No selection: use the current line
+	cursor := te.Cursor()
+	return te.Buffer.Line(cursor.Line)
+}
+
+// --- Global keyboard shortcuts ---
+
+func handleGlobalShortcut(e display.Event) bool {
+	k := ebiten.Key(e.Key)
+	cmd := ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight) ||
+		ebiten.IsKeyPressed(ebiten.KeyControl)
+	if !cmd {
+		return false
+	}
+
+	w := app.wm.Focused()
+	if w == nil || w.Editor == nil {
+		return false
+	}
+
+	switch k {
+	case ebiten.KeyD:
+		doIt(w)
+		return true
+	case ebiten.KeyP:
+		printIt(w)
+		return true
+	}
+	return false
+}
+
+// --- Transcript ---
+
+func transcriptWrite(text string) {
+	wm := app.wm
+	var transcript *display.Window
+	for _, w := range wm.Windows() {
+		if w.Title == "Transcript" && !w.Closed {
+			transcript = w
+			break
+		}
+	}
+	if transcript == nil {
+		transcript = display.NewWindow(700, 80, 500, 300, "Transcript")
+		transcript.SetEditor("")
+		wm.AddWindow(transcript)
+	}
+	if transcript.Editor != nil {
+		existing := transcript.Editor.Text()
+		if existing != "" && !strings.HasSuffix(existing, "\n") {
+			existing += "\n"
+		}
+		transcript.Editor.SetText(existing + text)
+		transcript.MarkDirty()
+	}
+}
+
+// --- Paths ---
+
 func findSourceDir() string {
 	if info, err := os.Stat("src"); err == nil && info.IsDir() {
 		return "src"
@@ -114,14 +329,11 @@ func findSourceDir() string {
 	return ""
 }
 
-// findMaggieImage locates the Maggie base image.
 func findMaggieImage() string {
-	// Check standard locations
 	paths := []string{
 		"maggie.image",
 		os.ExpandEnv("$HOME/dev/go/maggie/cmd/mag/maggie.image"),
 	}
-	// Also check next to the mag binary
 	if magPath, err := os.Executable(); err == nil {
 		dir := magPath[:strings.LastIndex(magPath, "/")]
 		paths = append(paths, dir+"/maggie.image")
@@ -134,10 +346,9 @@ func findMaggieImage() string {
 	return ""
 }
 
-// registerDisplayPrimitives registers Go functions that Maggie code can call
-// to interact with the display system.
-func registerDisplayPrimitives(vmInst *vm.VM, screen *display.Form, wm *display.WindowManager) {
-	// Create a DoradoDisplay class for display operations
+// --- Display primitives for Maggie ---
+
+func registerDisplayPrimitives(vmInst *vm.VM, wm *display.WindowManager) {
 	displayClass := vmInst.Classes.Lookup("DoradoDisplay")
 	if displayClass == nil {
 		displayClass = vm.NewClass("DoradoDisplay", vmInst.ObjectClass)
@@ -145,12 +356,6 @@ func registerDisplayPrimitives(vmInst *vm.VM, screen *display.Form, wm *display.
 	}
 	vmInst.SetGlobal("DoradoDisplay", vmInst.ClassValue(displayClass))
 
-	// --- Window creation and management ---
-
-	// DoradoDisplay newWindow: title x: x y: y width: w  → returns a window ID
-	// (>4 params, so we split into two steps)
-
-	// DoradoDisplay newWindow: title → creates window at default position, returns window index
 	displayClass.AddClassMethod1(vmInst.Selectors, "newWindow:", func(vmPtr interface{}, recv vm.Value, titleVal vm.Value) vm.Value {
 		v := vmPtr.(*vm.VM)
 		title := v.Registry().GetStringContent(titleVal)
@@ -160,44 +365,21 @@ func registerDisplayPrimitives(vmInst *vm.VM, screen *display.Form, wm *display.
 		return vm.FromSmallInt(int64(len(wm.Windows()) - 1))
 	})
 
-	// DoradoDisplay windowCount → number of open windows
-	displayClass.AddClassMethod0(vmInst.Selectors, "windowCount", func(vmPtr interface{}, recv vm.Value) vm.Value {
+	displayClass.AddClassMethod0(vmInst.Selectors, "windowCount", func(_ interface{}, _ vm.Value) vm.Value {
 		return vm.FromSmallInt(int64(len(wm.Windows())))
 	})
 
-	// DoradoDisplay screenWidth / screenHeight
 	displayClass.AddClassMethod0(vmInst.Selectors, "screenWidth", func(_ interface{}, _ vm.Value) vm.Value {
-		return vm.FromSmallInt(int64(screen.Width()))
+		return vm.FromSmallInt(int64(app.screen.Width()))
 	})
 	displayClass.AddClassMethod0(vmInst.Selectors, "screenHeight", func(_ interface{}, _ vm.Value) vm.Value {
-		return vm.FromSmallInt(int64(screen.Height()))
+		return vm.FromSmallInt(int64(app.screen.Height()))
 	})
 
-	// DoradoDisplay transcript: text → write text to a Transcript window
 	displayClass.AddClassMethod1(vmInst.Selectors, "transcript:", func(vmPtr interface{}, recv vm.Value, textVal vm.Value) vm.Value {
 		v := vmPtr.(*vm.VM)
 		text := v.Registry().GetStringContent(textVal)
-		// Find or create Transcript window
-		var transcript *display.Window
-		for _, w := range wm.Windows() {
-			if w.Title == "Transcript" && !w.Closed {
-				transcript = w
-				break
-			}
-		}
-		if transcript == nil {
-			transcript = display.NewWindow(700, 80, 400, 300, "Transcript")
-			transcript.SetEditor("")
-			wm.AddWindow(transcript)
-		}
-		if transcript.Editor != nil {
-			existing := transcript.Editor.Text()
-			if existing != "" && !strings.HasSuffix(existing, "\n") {
-				existing += "\n"
-			}
-			transcript.Editor.SetText(existing + text)
-			transcript.MarkDirty()
-		}
+		transcriptWrite(text)
 		return vm.Nil
 	})
 }

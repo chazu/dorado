@@ -1,10 +1,6 @@
 Main subclass: Object
 
   classMethod: start [
-    'Dorado Main.start running' println.
-    DoradoDisplay transcript: 'Hello from Maggie!'.
-    DoradoDisplay transcript: 'VM is connected to the display.'.
-    ('Window count: ', DoradoDisplay windowCount printString) println.
-    DoradoDisplay newWindow: 'Workspace'.
-    ('Window count after: ', DoradoDisplay windowCount printString) println.
+    DoradoDisplay transcript: 'Dorado started.'.
+    DoradoDisplay transcript: 'Maggie VM is live — use Cmd+D to Do it, Cmd+P to Print it.'.
   ]

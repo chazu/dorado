@@ -100,6 +100,10 @@ func (te *TextEditor) ensureCursorVisible() {
 func (te *TextEditor) HandleEvent(e Event) bool {
 	switch e.Type {
 	case EventKeyChar:
+		// Don't insert characters when Cmd/Ctrl is held (those are shortcuts)
+		if isCmdOrCtrl() {
+			return false
+		}
 		te.insertChar(e.Char)
 		return true
 	case EventKeyDown:
