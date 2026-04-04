@@ -233,6 +233,12 @@ func windowMenu(w *display.Window, x, y int) []display.MenuItem {
 // --- Do it / Print it ---
 
 func doIt(w *display.Window) {
+	defer func() {
+		if r := recover(); r != nil {
+			transcriptWrite(fmt.Sprintf("Do it error (panic): %v", r))
+		}
+	}()
+
 	if w == nil || w.Editor == nil {
 		return
 	}
@@ -249,14 +255,23 @@ func doIt(w *display.Window) {
 }
 
 func inspectIt(w *display.Window) {
+	defer func() {
+		if r := recover(); r != nil {
+			transcriptWrite(fmt.Sprintf("Inspect error (panic): %v", r))
+		}
+	}()
+
 	if w == nil || w.Editor == nil {
+		transcriptWrite("Inspect: no editor in focused window")
 		return
 	}
 	source := getEvalSource(w.Editor)
 	if source == "" {
+		transcriptWrite("Inspect: no text selected or current line empty")
 		return
 	}
 
+	transcriptWrite("Inspecting: " + source)
 	result, _, err := evalExpression(app.vm, source)
 	if err != nil {
 		transcriptWrite("Error: " + err.Error())
@@ -267,6 +282,12 @@ func inspectIt(w *display.Window) {
 }
 
 func printIt(w *display.Window) {
+	defer func() {
+		if r := recover(); r != nil {
+			transcriptWrite(fmt.Sprintf("Print it error (panic): %v", r))
+		}
+	}()
+
 	if w == nil || w.Editor == nil {
 		return
 	}
