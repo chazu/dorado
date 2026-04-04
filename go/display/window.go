@@ -1,34 +1,41 @@
 package display
 
+const (
+	titleBarHeight = 20
+	borderWidth    = 1
+	closeBoxSize   = 12
+	closeBoxPad    = 4
+	resizeGripSize = 12 // bottom-right resize grip
+	minWindowW     = 120
+	minWindowH     = 80
+)
+
 // Window represents a single overlapping window on the display.
 type Window struct {
 	X, Y          int    // position on screen
 	Width, Height int    // outer dimensions including chrome
 	Title         string
-	Content       *Form  // the content area (excludes chrome)
-	Editor        *TextEditor // optional embedded text editor
-	OnContentClick func(localX, localY int) // custom click handler (overrides editor)
-	OnKeyEvent     func(e Event) bool       // custom key handler (before editor)
+	Content       *Form        // the content area (excludes chrome)
+	Editor        *TextEditor  // optional embedded text editor
+	OnContentClick func(localX, localY int)
+	OnKeyEvent     func(e Event) bool
+	OnResize       func(contentW, contentH int) // called after resize
 	Closed        bool
+	Collapsed     bool // title-bar only
 
 	// internal
-	form     *Form // full window form including chrome
-	contentX int   // content area offset within form
-	contentY int   // content area offset within form
-	contentW int   // content area width
-	contentH int   // content area height
-	dirty    bool  // needs redraw
+	form     *Form
+	contentX int
+	contentY int
+	contentW int
+	contentH int
+	dirty    bool
+
+	// Saved dimensions for collapse/expand
+	savedHeight int
 }
 
-const (
-	titleBarHeight = 20
-	borderWidth    = 1
-	closeBoxSize   = 12
-	closeBoxPad    = 4 // padding from top-left corner of title bar
-)
-
 // NewWindow creates a window with the given content area dimensions.
-// The actual window is larger due to chrome (title bar, borders).
 func NewWindow(x, y, contentW, contentH int, title string) *Window {
 	w := contentW + borderWidth*2
 	h := contentH + titleBarHeight + borderWidth*2
@@ -48,7 +55,6 @@ func NewWindow(x, y, contentW, contentH int, title string) *Window {
 
 	win.form = NewForm(w, h)
 	win.Content = NewForm(contentW, contentH)
-	// Fill content white by default
 	win.Content.Fill(ColorRGB(255, 255, 255))
 
 	return win
@@ -75,6 +81,60 @@ func (w *Window) ContentBounds() (x, y, width, height int) {
 	return w.X + w.contentX, w.Y + w.contentY, w.contentW, w.contentH
 }
 
+// Resize changes the window's content area dimensions and reallocates forms.
+func (w *Window) Resize(newContentW, newContentH int) {
+	if newContentW < minWindowW-borderWidth*2 {
+		newContentW = minWindowW - borderWidth*2
+	}
+	if newContentH < minWindowH-titleBarHeight-borderWidth*2 {
+		newContentH = minWindowH - titleBarHeight - borderWidth*2
+	}
+
+	w.contentW = newContentW
+	w.contentH = newContentH
+	w.Width = newContentW + borderWidth*2
+	w.Height = newContentH + titleBarHeight + borderWidth*2
+
+	w.form = NewForm(w.Width, w.Height)
+
+	// Preserve editor text if present
+	oldText := ""
+	if w.Editor != nil {
+		oldText = w.Editor.Text()
+	}
+
+	w.Content = NewForm(newContentW, newContentH)
+	w.Content.Fill(ColorRGB(255, 255, 255))
+
+	if w.Editor != nil {
+		w.Editor = NewTextEditor(w.Content, oldText)
+	}
+
+	if w.OnResize != nil {
+		w.OnResize(newContentW, newContentH)
+	}
+
+	w.dirty = true
+}
+
+// ToggleCollapse collapses or expands the window.
+func (w *Window) ToggleCollapse() {
+	if w.Collapsed {
+		// Expand
+		w.Height = w.savedHeight
+		w.contentH = w.Height - titleBarHeight - borderWidth*2
+		w.form = NewForm(w.Width, w.Height)
+		w.Collapsed = false
+	} else {
+		// Collapse to title bar only
+		w.savedHeight = w.Height
+		w.Height = titleBarHeight + borderWidth*2
+		w.form = NewForm(w.Width, w.Height)
+		w.Collapsed = true
+	}
+	w.dirty = true
+}
+
 // Render composites the window chrome and content into the window's form.
 func (w *Window) Render() *Form {
 	if !w.dirty {
@@ -83,56 +143,84 @@ func (w *Window) Render() *Form {
 	w.dirty = false
 
 	f := w.form
+	black := ColorRGB(0, 0, 0)
+	white := ColorRGB(255, 255, 255)
+	darkGray := ColorRGB(80, 80, 80)
 
 	// Clear
-	f.Fill(ColorRGB(255, 255, 255))
+	f.Fill(white)
 
 	// Title bar background
-	f.FillRectWH(ColorRGB(80, 80, 80), borderWidth, borderWidth, w.Width-borderWidth*2, titleBarHeight)
+	f.FillRectWH(darkGray, borderWidth, borderWidth, w.Width-borderWidth*2, titleBarHeight)
 
 	// Close box
 	cbX := borderWidth + closeBoxPad
 	cbY := borderWidth + (titleBarHeight-closeBoxSize)/2
-	f.FillRectWH(ColorRGB(255, 255, 255), cbX, cbY, closeBoxSize, closeBoxSize)
-	drawRectOutline(f, cbX, cbY, closeBoxSize, closeBoxSize, ColorRGB(0, 0, 0))
+	f.FillRectWH(white, cbX, cbY, closeBoxSize, closeBoxSize)
+	drawRectOutline(f, cbX, cbY, closeBoxSize, closeBoxSize, black)
 
-	// Title text
-	textX := cbX + closeBoxSize + 8
-	textY := borderWidth + (titleBarHeight-DefaultFont().LineHeight())/2
-	DrawString(f, textX, textY, w.Title, ColorRGB(255, 255, 255))
-
-	// Render editor into content form if present
-	if w.Editor != nil {
-		w.Editor.Render()
+	// Collapse box (next to close box)
+	colX := cbX + closeBoxSize + 4
+	colY := cbY
+	f.FillRectWH(white, colX, colY, closeBoxSize, closeBoxSize)
+	drawRectOutline(f, colX, colY, closeBoxSize, closeBoxSize, black)
+	// Draw a horizontal line in the collapse box to indicate minimize
+	midY := colY + closeBoxSize/2
+	for cx := colX + 2; cx < colX+closeBoxSize-2; cx++ {
+		f.SetPixelAt(cx, midY, black)
 	}
 
-	// Blit content into form
-	CopyBits(f, w.contentX, w.contentY, w.Content)
+	// Title text
+	textX := colX + closeBoxSize + 8
+	textY := borderWidth + (titleBarHeight-DefaultFont().LineHeight())/2
+	DrawString(f, textX, textY, w.Title, white)
+
+	if !w.Collapsed {
+		// Render editor into content form if present
+		if w.Editor != nil {
+			w.Editor.Render()
+		}
+
+		// Blit content into form
+		CopyBits(f, w.contentX, w.contentY, w.Content)
+
+		// Resize grip (bottom-right corner, small triangle)
+		gripX := w.Width - resizeGripSize - 1
+		gripY := w.Height - resizeGripSize - 1
+		for dy := 0; dy < resizeGripSize; dy++ {
+			for dx := resizeGripSize - dy; dx < resizeGripSize; dx++ {
+				if (dx+dy)%3 == 0 {
+					f.SetPixelAt(gripX+dx, gripY+dy, ColorRGB(120, 120, 120))
+				}
+			}
+		}
+	}
 
 	// Outer border
-	drawRectOutline(f, 0, 0, w.Width, w.Height, ColorRGB(0, 0, 0))
+	drawRectOutline(f, 0, 0, w.Width, w.Height, black)
 
 	// Title bar separator
 	for x := 0; x < w.Width; x++ {
-		f.SetPixelAt(x, borderWidth+titleBarHeight, ColorRGB(0, 0, 0))
+		f.SetPixelAt(x, borderWidth+titleBarHeight, black)
 	}
 
 	return f
 }
 
-// HitTest checks what part of the window a screen-space point hits.
+// HitZone identifies which part of a window was clicked.
 type HitZone int
 
 const (
-	HitNone    HitZone = iota
+	HitNone       HitZone = iota
 	HitTitleBar
 	HitCloseBox
+	HitCollapseBox
 	HitContent
+	HitResizeGrip
 )
 
 // HitTest returns the zone hit by screen-space coordinates.
 func (w *Window) HitTest(sx, sy int) HitZone {
-	// Convert to window-local coords
 	lx := sx - w.X
 	ly := sy - w.Y
 
@@ -147,9 +235,24 @@ func (w *Window) HitTest(sx, sy int) HitZone {
 		return HitCloseBox
 	}
 
+	// Collapse box
+	colX := cbX + closeBoxSize + 4
+	if lx >= colX && lx < colX+closeBoxSize && ly >= cbY && ly < cbY+closeBoxSize {
+		return HitCollapseBox
+	}
+
 	// Title bar
 	if ly >= borderWidth && ly < borderWidth+titleBarHeight {
 		return HitTitleBar
+	}
+
+	if w.Collapsed {
+		return HitNone
+	}
+
+	// Resize grip (bottom-right corner)
+	if lx >= w.Width-resizeGripSize-1 && ly >= w.Height-resizeGripSize-1 {
+		return HitResizeGrip
 	}
 
 	// Content area

@@ -16,6 +16,13 @@ type WindowManager struct {
 	dragOffX int
 	dragOffY int
 
+	// Resize state
+	resizing      *Window
+	resizeStartW  int
+	resizeStartH  int
+	resizeStartMX int
+	resizeStartMY int
+
 	// Double-click detection
 	lastClickX    int
 	lastClickY    int
@@ -28,11 +35,17 @@ type WindowManager struct {
 	// Menu providers
 	WorldMenuFunc   func(x, y int) []MenuItem           // right-click on desktop
 	WindowMenuFunc  func(w *Window, x, y int) []MenuItem // right-click in window content
+
+	// Software cursor
+	cursor *Cursor
 }
 
 // NewWindowManager creates a window manager that composites onto the given screen Form.
 func NewWindowManager(screen *Form) *WindowManager {
-	return &WindowManager{screen: screen}
+	return &WindowManager{
+		screen: screen,
+		cursor: NewCursor(),
+	}
 }
 
 // AddWindow adds a window to the top of the z-order and focuses it.
@@ -100,6 +113,13 @@ func (wm *WindowManager) HasMenu() bool {
 // HandleEvent processes an input event and updates window state.
 // Returns true if the event was consumed.
 func (wm *WindowManager) HandleEvent(e Event) bool {
+	// Always track cursor position
+	if e.Type == EventMouseMove {
+		wm.cursor.X = e.X
+		wm.cursor.Y = e.Y
+		wm.updateCursorShape(e.X, e.Y)
+	}
+
 	// If a menu is open, it gets priority
 	if wm.activeMenu != nil {
 		return wm.handleMenuEvent(e)
@@ -116,6 +136,36 @@ func (wm *WindowManager) HandleEvent(e Event) bool {
 		return wm.handleKeyboard(e)
 	}
 	return false
+}
+
+func (wm *WindowManager) updateCursorShape(x, y int) {
+	if wm.resizing != nil {
+		wm.cursor.Shape = CursorResize
+		return
+	}
+	if wm.dragging != nil {
+		wm.cursor.Shape = CursorArrow
+		return
+	}
+
+	w := wm.WindowAt(x, y)
+	if w == nil {
+		wm.cursor.Shape = CursorArrow
+		return
+	}
+
+	switch w.HitTest(x, y) {
+	case HitContent:
+		if w.Editor != nil {
+			wm.cursor.Shape = CursorText
+		} else {
+			wm.cursor.Shape = CursorArrow
+		}
+	case HitResizeGrip:
+		wm.cursor.Shape = CursorResize
+	default:
+		wm.cursor.Shape = CursorArrow
+	}
 }
 
 func (wm *WindowManager) handleMenuEvent(e Event) bool {
@@ -166,10 +216,20 @@ func (wm *WindowManager) handleMouseDown(e Event) bool {
 		w.Closed = true
 		wm.RemoveWindow(w)
 		return true
+	case HitCollapseBox:
+		w.ToggleCollapse()
+		return true
 	case HitTitleBar:
 		wm.dragging = w
 		wm.dragOffX = e.X - w.X
 		wm.dragOffY = e.Y - w.Y
+		return true
+	case HitResizeGrip:
+		wm.resizing = w
+		wm.resizeStartW = w.Width
+		wm.resizeStartH = w.Height
+		wm.resizeStartMX = e.X
+		wm.resizeStartMY = e.Y
 		return true
 	case HitContent:
 		// Custom click handler takes priority
@@ -239,6 +299,11 @@ func (wm *WindowManager) handleMouseUp(e Event) bool {
 		wm.dragging = nil
 		return true
 	}
+	if wm.resizing != nil {
+		wm.resizing.MarkDirty()
+		wm.resizing = nil
+		return true
+	}
 	// Release scrollbar drag
 	if wm.focused != nil && wm.focused.Editor != nil {
 		wm.focused.Editor.HandleReleaseLocal()
@@ -252,6 +317,14 @@ func (wm *WindowManager) handleMouseMove(e Event) bool {
 		wm.dragging.X = e.X - wm.dragOffX
 		wm.dragging.Y = e.Y - wm.dragOffY
 		wm.dragging.MarkDirty()
+		return true
+	}
+	if wm.resizing != nil {
+		dx := e.X - wm.resizeStartMX
+		dy := e.Y - wm.resizeStartMY
+		newW := wm.resizeStartW + dx - borderWidth*2
+		newH := wm.resizeStartH + dy - titleBarHeight - borderWidth*2
+		wm.resizing.Resize(newW, newH)
 		return true
 	}
 	// Scrollbar drag
@@ -310,4 +383,7 @@ func (wm *WindowManager) Composite(bgColor uint32) {
 		menuForm := wm.activeMenu.Render()
 		CopyBits(wm.screen, wm.activeMenu.X, wm.activeMenu.Y, menuForm)
 	}
+
+	// Draw software cursor on top
+	wm.cursor.Draw(wm.screen)
 }
