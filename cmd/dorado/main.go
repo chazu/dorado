@@ -196,6 +196,11 @@ func windowMenu(w *display.Window, x, y int) []display.MenuItem {
 		return inspectorMenu(insp)
 	}
 
+	// Check if this is a browser window
+	if br := getBrowserForWindow(w); br != nil {
+		return browserMenu(br)
+	}
+
 	items := []display.MenuItem{
 		{Label: "Do it  (⌘D)", Action: func() { doIt(w) }},
 		{Label: "Print it  (⌘P)", Action: func() { printIt(w) }},
