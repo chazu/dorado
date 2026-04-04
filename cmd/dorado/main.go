@@ -181,6 +181,7 @@ func windowMenu(w *display.Window, x, y int) []display.MenuItem {
 	items := []display.MenuItem{
 		{Label: "Do it  (⌘D)", Action: func() { doIt(w) }},
 		{Label: "Print it  (⌘P)", Action: func() { printIt(w) }},
+		{Label: "Inspect it  (⌘I)", Action: func() { inspectIt(w) }},
 		display.Separator(),
 		{Label: "Cut", Action: func() {
 			if w.Editor != nil {
@@ -232,6 +233,24 @@ func doIt(w *display.Window) {
 		transcriptWrite("Error: " + err.Error())
 	}
 	w.MarkDirty()
+}
+
+func inspectIt(w *display.Window) {
+	if w == nil || w.Editor == nil {
+		return
+	}
+	source := getEvalSource(w.Editor)
+	if source == "" {
+		return
+	}
+
+	result, _, err := evalExpression(app.vm, source)
+	if err != nil {
+		transcriptWrite("Error: " + err.Error())
+		return
+	}
+
+	openInspector(app.vm, result)
 }
 
 func printIt(w *display.Window) {
@@ -289,6 +308,9 @@ func handleGlobalShortcut(e display.Event) bool {
 		return true
 	case ebiten.KeyP:
 		printIt(w)
+		return true
+	case ebiten.KeyI:
+		inspectIt(w)
 		return true
 	}
 	return false
