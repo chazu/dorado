@@ -101,6 +101,12 @@ func main() {
 			}
 			wm.HandleEvent(e)
 		}
+
+		// Refresh debugger if active
+		if debugger != nil && debugger.active {
+			refreshDebugger()
+		}
+
 		wm.Composite(colorBG)
 	}
 
@@ -172,6 +178,10 @@ func worldMenu(x, y int) []display.MenuItem {
 			w := display.NewWindow(x, y, 500, 300, "Transcript")
 			w.SetEditor("")
 			app.wm.AddWindow(w)
+		}},
+		display.Separator(),
+		{Label: "Debugger", Action: func() {
+			openDebugger()
 		}},
 		display.Separator(),
 		{Label: "About Dorado", Action: func() {

@@ -3,7 +3,7 @@ module github.com/chazu/dorado
 go 1.25.8
 
 require (
-	github.com/chazu/maggie v0.1.0
+	github.com/chazu/maggie v0.2.1
 	github.com/hajimehoshi/ebiten/v2 v2.9.9
 )
 
