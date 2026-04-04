@@ -165,6 +165,9 @@ func worldMenu(x, y int) []display.MenuItem {
 			w.SetEditor("")
 			app.wm.AddWindow(w)
 		}},
+		{Label: "System Browser", Action: func() {
+			openBrowser()
+		}},
 		{Label: "New Transcript", Action: func() {
 			w := display.NewWindow(x, y, 500, 300, "Transcript")
 			w.SetEditor("")

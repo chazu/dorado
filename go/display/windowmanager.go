@@ -172,6 +172,13 @@ func (wm *WindowManager) handleMouseDown(e Event) bool {
 		wm.dragOffY = e.Y - w.Y
 		return true
 	case HitContent:
+		// Custom click handler takes priority
+		if w.OnContentClick != nil {
+			lx, ly := w.ScreenToContent(e.X, e.Y)
+			w.OnContentClick(lx, ly)
+			w.MarkDirty()
+			return true
+		}
 		if w.Editor != nil {
 			lx, ly := w.ScreenToContent(e.X, e.Y)
 			shift := ebiten.IsKeyPressed(ebiten.KeyShift)
@@ -258,7 +265,17 @@ func (wm *WindowManager) handleMouseMove(e Event) bool {
 }
 
 func (wm *WindowManager) handleKeyboard(e Event) bool {
-	if wm.focused != nil && wm.focused.Editor != nil {
+	if wm.focused == nil {
+		return false
+	}
+	// Custom key handler takes priority
+	if wm.focused.OnKeyEvent != nil {
+		if wm.focused.OnKeyEvent(e) {
+			wm.focused.MarkDirty()
+			return true
+		}
+	}
+	if wm.focused.Editor != nil {
 		consumed := wm.focused.Editor.HandleEvent(e)
 		if consumed {
 			wm.focused.MarkDirty()

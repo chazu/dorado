@@ -7,6 +7,8 @@ type Window struct {
 	Title         string
 	Content       *Form  // the content area (excludes chrome)
 	Editor        *TextEditor // optional embedded text editor
+	OnContentClick func(localX, localY int) // custom click handler (overrides editor)
+	OnKeyEvent     func(e Event) bool       // custom key handler (before editor)
 	Closed        bool
 
 	// internal
