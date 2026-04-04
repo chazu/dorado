@@ -6,6 +6,7 @@ type Window struct {
 	Width, Height int    // outer dimensions including chrome
 	Title         string
 	Content       *Form  // the content area (excludes chrome)
+	Editor        *TextEditor // optional embedded text editor
 	Closed        bool
 
 	// internal
@@ -51,6 +52,19 @@ func NewWindow(x, y, contentW, contentH int, title string) *Window {
 	return win
 }
 
+// SetEditor attaches a text editor to the window's content area.
+func (w *Window) SetEditor(text string) *TextEditor {
+	te := NewTextEditor(w.Content, text)
+	w.Editor = te
+	w.dirty = true
+	return te
+}
+
+// ScreenToContent converts screen-space coordinates to content-local coordinates.
+func (w *Window) ScreenToContent(sx, sy int) (int, int) {
+	return sx - w.X - w.contentX, sy - w.Y - w.contentY
+}
+
 // MarkDirty flags the window for redraw.
 func (w *Window) MarkDirty() { w.dirty = true }
 
@@ -84,6 +98,11 @@ func (w *Window) Render() *Form {
 	textX := cbX + closeBoxSize + 8
 	textY := borderWidth + (titleBarHeight-DefaultFont().LineHeight())/2
 	DrawString(f, textX, textY, w.Title, ColorRGB(255, 255, 255))
+
+	// Render editor into content form if present
+	if w.Editor != nil {
+		w.Editor.Render()
+	}
 
 	// Blit content into form
 	CopyBits(f, w.contentX, w.contentY, w.Content)

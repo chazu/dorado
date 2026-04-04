@@ -22,17 +22,30 @@ func main() {
 	backend := display.NewEbitengineBackend(screen)
 	wm := display.NewWindowManager(screen)
 
-	// Create some windows
+	// Workspace — editable text pane
 	workspace := display.NewWindow(80, 60, 500, 380, "Workspace")
-	drawWorkspaceContent(workspace.Content)
+	workspace.SetEditor(`"Welcome to Dorado — the ST-80 IDE for Maggie."
+
+| x |
+x := 42 factorial.
+Transcript show: x printString.
+
+"Unicode: αβγδ → ∞ ≠ ≈ © ♠♣♥♦ ★"
+
+"Try typing, selecting text, and editing!"`)
 	wm.AddWindow(workspace)
 
+	// System Browser — static content for now
 	browser := display.NewWindow(300, 200, 600, 430, "System Browser")
 	drawBrowserContent(browser.Content)
 	wm.AddWindow(browser)
 
+	// Transcript — editable
 	transcript := display.NewWindow(700, 80, 400, 300, "Transcript")
-	drawTranscriptContent(transcript.Content)
+	transcript.SetEditor(`Dorado started.
+Loading Workspace...
+Loading System Browser...
+Ready.`)
 	wm.AddWindow(transcript)
 
 	backend.OnUpdate = func() {
@@ -45,21 +58,6 @@ func main() {
 	if err := backend.Run(); err != nil {
 		log.Fatal(err)
 	}
-}
-
-func drawWorkspaceContent(f *display.Form) {
-	black := display.ColorRGB(0, 0, 0)
-	lh := display.DefaultFont().LineHeight() + 3
-	y := 8
-	display.DrawString(f, 8, y, "\"Welcome to Dorado — the ST-80 IDE for Maggie.\"", black)
-	y += lh * 2
-	display.DrawString(f, 8, y, "| x |", black)
-	y += lh
-	display.DrawString(f, 8, y, "x := 42 factorial.", black)
-	y += lh
-	display.DrawString(f, 8, y, "Transcript show: x printString.", black)
-	y += lh * 2
-	display.DrawString(f, 8, y, "\"Unicode: αβγδ → ∞ ≠ ≈ © ♠♣♥♦ ★\"", black)
 }
 
 func drawBrowserContent(f *display.Form) {
@@ -111,20 +109,7 @@ func drawBrowserContent(f *display.Form) {
 	y = 130
 	display.DrawString(f, 8, y, "printString", black)
 	y += lh
-	display.DrawString(f, 8, y, "    \"Return a string representation of the receiver.\"", black)
+	display.DrawString(f, 8, y, `    "Return a string representation of the receiver."`, black)
 	y += lh
 	display.DrawString(f, 8, y, "    ^ self class name", black)
-}
-
-func drawTranscriptContent(f *display.Form) {
-	black := display.ColorRGB(0, 0, 0)
-	lh := display.DefaultFont().LineHeight() + 3
-	y := 8
-	display.DrawString(f, 8, y, "Dorado started.", black)
-	y += lh
-	display.DrawString(f, 8, y, "Loading Workspace...", black)
-	y += lh
-	display.DrawString(f, 8, y, "Loading System Browser...", black)
-	y += lh
-	display.DrawString(f, 8, y, "Ready.", black)
 }
