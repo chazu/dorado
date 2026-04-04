@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 
 	"github.com/chazu/dorado/go/display"
@@ -12,18 +13,19 @@ const (
 )
 
 var (
-	colorBG      = display.ColorRGB(168, 168, 168) // ST-80 medium gray
-	colorWhite   = display.ColorRGB(255, 255, 255)
-	colorBlack   = display.ColorRGB(0, 0, 0)
+	colorBG       = display.ColorRGB(168, 168, 168) // ST-80 medium gray
+	colorWhite    = display.ColorRGB(255, 255, 255)
+	colorBlack    = display.ColorRGB(0, 0, 0)
 	colorDarkGray = display.ColorRGB(80, 80, 80)
 )
 
 func main() {
+	// Pre-load the font so any parse error is caught early
+	font := display.DefaultFont()
+	fmt.Printf("Cozette: %d glyphs, %dpx line height\n", len(font.Glyphs), font.LineHeight())
+
 	screen := display.NewForm(screenW, screenH)
 	backend := display.NewEbitengineBackend(screen)
-
-	// Draw the initial scene
-	drawScene(screen)
 
 	// Track mouse position for the cursor follower
 	cursorX, cursorY := 0, 0
@@ -51,9 +53,17 @@ func drawScene(screen *display.Form) {
 	// Gray desktop background
 	screen.Fill(colorBG)
 
-	// Draw two overlapping "windows" to demonstrate z-order and BitBlt
+	// Draw two overlapping "windows"
 	drawWindow(screen, 80, 60, 500, 400, "Workspace")
 	drawWindow(screen, 300, 200, 600, 450, "System Browser")
+
+	// Demo text in the Workspace content area
+	display.DrawString(screen, 92, 96, "Welcome to Dorado — the ST-80 IDE for Maggie.", colorBlack)
+	display.DrawString(screen, 92, 112, "Form + BitBlt + Cozette font rendering.", colorBlack)
+	display.DrawString(screen, 92, 128, "Unicode: αβγδ → ∞ ≠ ≈ © ♠♣♥♦ ★", colorBlack)
+	display.DrawString(screen, 92, 160, "| x |", colorBlack)
+	display.DrawString(screen, 92, 176, "x := 42 factorial.", colorBlack)
+	display.DrawString(screen, 92, 192, "Transcript show: x printString.", colorBlack)
 
 	// XOR checkerboard pattern in the corner to demonstrate rule 6
 	checker := display.NewForm(128, 128)
@@ -79,7 +89,7 @@ func drawScene(screen *display.Form) {
 }
 
 func drawWindow(screen *display.Form, x, y, w, h int, title string) {
-	titleH := 24
+	titleH := 20
 
 	// White content area
 	screen.FillRectWH(colorWhite, x, y, w, h)
@@ -87,14 +97,21 @@ func drawWindow(screen *display.Form, x, y, w, h int, title string) {
 	// Dark gray title bar
 	screen.FillRectWH(colorDarkGray, x, y, w, titleH)
 
-	// Render title text as simple block letters (no font yet)
-	// Start after the close box (x+4 + 16px box + 6px gap = x+26)
-	tx := x + 26
-	ty := y + 5
-	for _, ch := range title {
-		drawChar(screen, tx, ty, ch)
-		tx += 12 // 10px char width + 2px kerning gap
-	}
+	// Close box (small square in top-left of title bar)
+	closeSize := 12
+	closePad := (titleH - closeSize) / 2
+	closeX := x + closePad
+	closeY := y + closePad
+	screen.FillRectWH(colorWhite, closeX, closeY, closeSize, closeSize)
+	drawHLine(screen, closeX, closeY, closeSize)
+	drawHLine(screen, closeX, closeY+closeSize-1, closeSize)
+	drawVLine(screen, closeX, closeY, closeSize)
+	drawVLine(screen, closeX+closeSize-1, closeY, closeSize)
+
+	// Title text — positioned after close box with gap
+	textX := closeX + closeSize + 8
+	textY := y + (titleH-display.DefaultFont().LineHeight())/2
+	display.DrawString(screen, textX, textY, title, colorWhite)
 
 	// 1px black border
 	drawHLine(screen, x, y, w)
@@ -104,13 +121,6 @@ func drawWindow(screen *display.Form, x, y, w, h int, title string) {
 
 	// Title bar separator
 	drawHLine(screen, x, y+titleH, w)
-
-	// Close box (small square in top-left)
-	screen.FillRectWH(colorWhite, x+4, y+4, 16, 16)
-	drawHLine(screen, x+4, y+4, 16)
-	drawHLine(screen, x+4, y+19, 16)
-	drawVLine(screen, x+4, y+4, 16)
-	drawVLine(screen, x+19, y+4, 16)
 }
 
 func drawHLine(f *display.Form, x, y, w int) {
@@ -125,47 +135,7 @@ func drawVLine(f *display.Form, x, y, h int) {
 	}
 }
 
-// drawChar renders a very crude 8x16 block character for the demo.
-// This is placeholder until we integrate the Cozette bitmap font.
-func drawChar(f *display.Form, x, y int, ch rune) {
-	// Minimal 5x7 bitmaps for uppercase + space, enough for window titles
-	glyphs := map[rune][]string{
-		'S': {"_###_", "#___#", "#____", "_###_", "____#", "#___#", "_###_"},
-		'y': {"#___#", "#___#", "_#_#_", "__#__", "_#___", "#____", "#____"},
-		's': {"_####", "#____", "_###_", "____#", "____#", "####_", "_____"},
-		't': {"#####", "__#__", "__#__", "__#__", "__#__", "__#__", "__#__"},
-		'e': {"#####", "#____", "#####", "#____", "#____", "#####", "_____"},
-		'm': {"#___#", "##_##", "#_#_#", "#___#", "#___#", "#___#", "_____"},
-		' ': {"_____", "_____", "_____", "_____", "_____", "_____", "_____"},
-		'B': {"####_", "#___#", "####_", "#___#", "#___#", "####_", "_____"},
-		'r': {"#_##_", "##__#", "#____", "#____", "#____", "#____", "_____"},
-		'o': {"_###_", "#___#", "#___#", "#___#", "#___#", "_###_", "_____"},
-		'w': {"#___#", "#___#", "#_#_#", "#_#_#", "##_##", "#___#", "_____"},
-		'W': {"#___#", "#___#", "#_#_#", "#_#_#", "##_##", "_#_#_", "_____"},
-		'k': {"#__#_", "#_#__", "##___", "#_#__", "#__#_", "#___#", "_____"},
-		'p': {"####_", "#___#", "#___#", "####_", "#____", "#____", "_____"},
-		'a': {"_###_", "#___#", "#___#", "#####", "#___#", "#___#", "_____"},
-		'c': {"_###_", "#___#", "#____", "#____", "#___#", "_###_", "_____"},
-		'i': {"__#__", "_____", "__#__", "__#__", "__#__", "__#__", "_____"},
-	}
-	glyph, ok := glyphs[ch]
-	if !ok {
-		return
-	}
-	for row, line := range glyph {
-		for col, c := range line {
-			if c == '#' {
-				f.SetPixelAt(x+col*2, y+row*2, colorWhite)
-				f.SetPixelAt(x+col*2+1, y+row*2, colorWhite)
-				f.SetPixelAt(x+col*2, y+row*2+1, colorWhite)
-				f.SetPixelAt(x+col*2+1, y+row*2+1, colorWhite)
-			}
-		}
-	}
-}
-
-// drawCursorFollower draws a small black square at the mouse position
-// to prove that event polling works.
+// drawCursorFollower draws a small inverted square at the mouse position.
 func drawCursorFollower(screen *display.Form, mx, my int) {
 	size := 8
 	op := &display.BitBltOp{
@@ -174,7 +144,7 @@ func drawCursorFollower(screen *display.Form, mx, my int) {
 		DstY:   my - size/2,
 		Width:  size,
 		Height: size,
-		Rule:   display.RuleInvertDest, // XOR-style invert so it's visible on any background
+		Rule:   display.RuleInvertDest,
 	}
 	op.Execute()
 }
