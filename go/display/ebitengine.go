@@ -66,7 +66,9 @@ func (b *EbitengineBackend) Draw(screen *ebiten.Image) {
 }
 
 func (b *EbitengineBackend) Layout(outsideWidth, outsideHeight int) (int, int) {
-	return b.width, b.height
+	// Always return the screen Form's dimensions as the logical size.
+	// This prevents black bars when the OS window size differs.
+	return b.screen.Width(), b.screen.Height()
 }
 
 // --- DisplayBackend interface ---
