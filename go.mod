@@ -3,7 +3,7 @@ module github.com/chazu/dorado
 go 1.25.8
 
 require (
-	github.com/chazu/maggie v0.0.0-20260404020603-70555cb4e717
+	github.com/chazu/maggie v0.1.0
 	github.com/hajimehoshi/ebiten/v2 v2.9.9
 )
 
@@ -62,5 +62,3 @@ require (
 	modernc.org/memory v1.11.0 // indirect
 	modernc.org/sqlite v1.46.1 // indirect
 )
-
-replace github.com/chazu/maggie => /Users/chazu/dev/go/maggie
