@@ -12,36 +12,34 @@ const (
 	screenH = 960
 )
 
-var (
-	colorBG       = display.ColorRGB(168, 168, 168) // ST-80 medium gray
-	colorWhite    = display.ColorRGB(255, 255, 255)
-	colorBlack    = display.ColorRGB(0, 0, 0)
-	colorDarkGray = display.ColorRGB(80, 80, 80)
-)
+var colorBG = display.ColorRGB(168, 168, 168) // ST-80 medium gray
 
 func main() {
-	// Pre-load the font so any parse error is caught early
 	font := display.DefaultFont()
 	fmt.Printf("Cozette: %d glyphs, %dpx line height\n", len(font.Glyphs), font.LineHeight())
 
 	screen := display.NewForm(screenW, screenH)
 	backend := display.NewEbitengineBackend(screen)
+	wm := display.NewWindowManager(screen)
 
-	// Track mouse position for the cursor follower
-	cursorX, cursorY := 0, 0
+	// Create some windows
+	workspace := display.NewWindow(80, 60, 500, 380, "Workspace")
+	drawWorkspaceContent(workspace.Content)
+	wm.AddWindow(workspace)
+
+	browser := display.NewWindow(300, 200, 600, 430, "System Browser")
+	drawBrowserContent(browser.Content)
+	wm.AddWindow(browser)
+
+	transcript := display.NewWindow(700, 80, 400, 300, "Transcript")
+	drawTranscriptContent(transcript.Content)
+	wm.AddWindow(transcript)
 
 	backend.OnUpdate = func() {
-		events := backend.PollEvents()
-		for _, e := range events {
-			if e.Type == display.EventMouseMove {
-				cursorX = e.X
-				cursorY = e.Y
-			}
+		for _, e := range backend.PollEvents() {
+			wm.HandleEvent(e)
 		}
-
-		// Redraw scene + cursor follower each frame
-		drawScene(screen)
-		drawCursorFollower(screen, cursorX, cursorY)
+		wm.Composite(colorBG)
 	}
 
 	if err := backend.Run(); err != nil {
@@ -49,102 +47,84 @@ func main() {
 	}
 }
 
-func drawScene(screen *display.Form) {
-	// Gray desktop background
-	screen.Fill(colorBG)
+func drawWorkspaceContent(f *display.Form) {
+	black := display.ColorRGB(0, 0, 0)
+	lh := display.DefaultFont().LineHeight() + 3
+	y := 8
+	display.DrawString(f, 8, y, "\"Welcome to Dorado — the ST-80 IDE for Maggie.\"", black)
+	y += lh * 2
+	display.DrawString(f, 8, y, "| x |", black)
+	y += lh
+	display.DrawString(f, 8, y, "x := 42 factorial.", black)
+	y += lh
+	display.DrawString(f, 8, y, "Transcript show: x printString.", black)
+	y += lh * 2
+	display.DrawString(f, 8, y, "\"Unicode: αβγδ → ∞ ≠ ≈ © ♠♣♥♦ ★\"", black)
+}
 
-	// Draw two overlapping "windows"
-	drawWindow(screen, 80, 60, 500, 400, "Workspace")
-	drawWindow(screen, 300, 200, 600, 450, "System Browser")
+func drawBrowserContent(f *display.Form) {
+	black := display.ColorRGB(0, 0, 0)
+	gray := display.ColorRGB(168, 168, 168)
+	lh := display.DefaultFont().LineHeight() + 3
 
-	// Demo text in the Workspace content area
-	display.DrawString(screen, 92, 96, "Welcome to Dorado — the ST-80 IDE for Maggie.", colorBlack)
-	display.DrawString(screen, 92, 112, "Form + BitBlt + Cozette font rendering.", colorBlack)
-	display.DrawString(screen, 92, 128, "Unicode: αβγδ → ∞ ≠ ≈ © ♠♣♥♦ ★", colorBlack)
-	display.DrawString(screen, 92, 160, "| x |", colorBlack)
-	display.DrawString(screen, 92, 176, "x := 42 factorial.", colorBlack)
-	display.DrawString(screen, 92, 192, "Transcript show: x printString.", colorBlack)
-
-	// XOR checkerboard pattern in the corner to demonstrate rule 6
-	checker := display.NewForm(128, 128)
-	for y := 0; y < 128; y++ {
-		for x := 0; x < 128; x++ {
-			if (x/8+y/8)%2 == 0 {
-				checker.SetPixelAt(x, y, colorBlack)
-			} else {
-				checker.SetPixelAt(x, y, colorWhite)
-			}
+	// Simulate the four-pane header
+	pw := f.Width() / 4
+	for i := 1; i < 4; i++ {
+		x := pw * i
+		for y := 0; y < 120; y++ {
+			f.SetPixelAt(x, y, gray)
 		}
 	}
-	op := &display.BitBltOp{
-		Dst:    screen,
-		Src:    checker,
-		DstX:   screenW - 160,
-		DstY:   screenH - 160,
-		Width:  128,
-		Height: 128,
-		Rule:   display.RuleXor,
+	for x := 0; x < f.Width(); x++ {
+		f.SetPixelAt(x, 120, gray)
 	}
-	op.Execute()
+
+	// Category pane
+	y := 8
+	for _, cat := range []string{"Kernel-Objects", "Kernel-Classes", "Kernel-Methods", "Collections-Abstract", "Collections-Sequenceable"} {
+		display.DrawString(f, 8, y, cat, black)
+		y += lh
+	}
+
+	// Class pane
+	y = 8
+	for _, cls := range []string{"Object", "Boolean", "True", "False", "UndefinedObject"} {
+		display.DrawString(f, pw+8, y, cls, black)
+		y += lh
+	}
+
+	// Protocol pane
+	y = 8
+	for _, proto := range []string{"accessing", "comparing", "copying", "printing", "testing"} {
+		display.DrawString(f, pw*2+8, y, proto, black)
+		y += lh
+	}
+
+	// Method pane
+	y = 8
+	for _, meth := range []string{"yourself", "printString", "respondsTo:", "isKindOf:", "error:"} {
+		display.DrawString(f, pw*3+8, y, meth, black)
+		y += lh
+	}
+
+	// Code area
+	y = 130
+	display.DrawString(f, 8, y, "printString", black)
+	y += lh
+	display.DrawString(f, 8, y, "    \"Return a string representation of the receiver.\"", black)
+	y += lh
+	display.DrawString(f, 8, y, "    ^ self class name", black)
 }
 
-func drawWindow(screen *display.Form, x, y, w, h int, title string) {
-	titleH := 20
-
-	// White content area
-	screen.FillRectWH(colorWhite, x, y, w, h)
-
-	// Dark gray title bar
-	screen.FillRectWH(colorDarkGray, x, y, w, titleH)
-
-	// Close box (small square in top-left of title bar)
-	closeSize := 12
-	closePad := (titleH - closeSize) / 2
-	closeX := x + closePad
-	closeY := y + closePad
-	screen.FillRectWH(colorWhite, closeX, closeY, closeSize, closeSize)
-	drawHLine(screen, closeX, closeY, closeSize)
-	drawHLine(screen, closeX, closeY+closeSize-1, closeSize)
-	drawVLine(screen, closeX, closeY, closeSize)
-	drawVLine(screen, closeX+closeSize-1, closeY, closeSize)
-
-	// Title text — positioned after close box with gap
-	textX := closeX + closeSize + 8
-	textY := y + (titleH-display.DefaultFont().LineHeight())/2
-	display.DrawString(screen, textX, textY, title, colorWhite)
-
-	// 1px black border
-	drawHLine(screen, x, y, w)
-	drawHLine(screen, x, y+h-1, w)
-	drawVLine(screen, x, y, h)
-	drawVLine(screen, x+w-1, y, h)
-
-	// Title bar separator
-	drawHLine(screen, x, y+titleH, w)
-}
-
-func drawHLine(f *display.Form, x, y, w int) {
-	for i := 0; i < w; i++ {
-		f.SetPixelAt(x+i, y, colorBlack)
-	}
-}
-
-func drawVLine(f *display.Form, x, y, h int) {
-	for i := 0; i < h; i++ {
-		f.SetPixelAt(x, y+i, colorBlack)
-	}
-}
-
-// drawCursorFollower draws a small inverted square at the mouse position.
-func drawCursorFollower(screen *display.Form, mx, my int) {
-	size := 8
-	op := &display.BitBltOp{
-		Dst:    screen,
-		DstX:   mx - size/2,
-		DstY:   my - size/2,
-		Width:  size,
-		Height: size,
-		Rule:   display.RuleInvertDest,
-	}
-	op.Execute()
+func drawTranscriptContent(f *display.Form) {
+	black := display.ColorRGB(0, 0, 0)
+	lh := display.DefaultFont().LineHeight() + 3
+	y := 8
+	display.DrawString(f, 8, y, "Dorado started.", black)
+	y += lh
+	display.DrawString(f, 8, y, "Loading Workspace...", black)
+	y += lh
+	display.DrawString(f, 8, y, "Loading System Browser...", black)
+	y += lh
+	display.DrawString(f, 8, y, "Ready.", black)
 }
