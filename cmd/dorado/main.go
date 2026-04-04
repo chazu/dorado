@@ -191,6 +191,11 @@ func worldMenu(x, y int) []display.MenuItem {
 }
 
 func windowMenu(w *display.Window, x, y int) []display.MenuItem {
+	// Check if this is an inspector window
+	if insp := getInspectorForWindow(w); insp != nil {
+		return inspectorMenu(insp)
+	}
+
 	items := []display.MenuItem{
 		{Label: "Do it  (⌘D)", Action: func() { doIt(w) }},
 		{Label: "Print it  (⌘P)", Action: func() { printIt(w) }},
@@ -332,7 +337,27 @@ func handleGlobalShortcut(e display.Event) bool {
 	}
 
 	w := app.wm.Focused()
-	if w == nil || w.Editor == nil {
+	if w == nil {
+		return false
+	}
+
+	// Check if focused window is an inspector
+	if insp := getInspectorForWindow(w); insp != nil {
+		switch k {
+		case ebiten.KeyD:
+			insp.doIt()
+			return true
+		case ebiten.KeyP:
+			insp.printIt()
+			return true
+		case ebiten.KeyI:
+			insp.inspectSelected()
+			return true
+		}
+		return false
+	}
+
+	if w.Editor == nil {
 		return false
 	}
 
