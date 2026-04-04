@@ -48,6 +48,53 @@ Loading System Browser...
 Ready.`)
 	wm.AddWindow(transcript)
 
+	// World menu (right-click on desktop)
+	wm.WorldMenuFunc = func(x, y int) []display.MenuItem {
+		return []display.MenuItem{
+			{Label: "New Workspace", Action: func() {
+				w := display.NewWindow(x, y, 400, 300, "Workspace")
+				w.SetEditor("")
+				wm.AddWindow(w)
+			}},
+			display.Separator(),
+			{Label: "About Dorado", Disabled: true},
+		}
+	}
+
+	// Window context menu (right-click in content)
+	wm.WindowMenuFunc = func(w *display.Window, x, y int) []display.MenuItem {
+		items := []display.MenuItem{
+			{Label: "Cut", Action: func() {
+				if w.Editor != nil {
+					w.Editor.Cut()
+					w.MarkDirty()
+				}
+			}},
+			{Label: "Copy", Action: func() {
+				if w.Editor != nil {
+					w.Editor.Copy()
+				}
+			}},
+			{Label: "Paste", Action: func() {
+				if w.Editor != nil {
+					w.Editor.Paste()
+					w.MarkDirty()
+				}
+			}},
+			display.Separator(),
+			{Label: "Select All", Action: func() {
+				if w.Editor != nil {
+					w.Editor.HandleEvent(display.Event{
+						Type: display.EventKeyDown,
+						Key:  int(65), // 'A' key — will be handled with cmd/ctrl
+					})
+					w.MarkDirty()
+				}
+			}},
+		}
+		return items
+	}
+
 	backend.OnUpdate = func() {
 		for _, e := range backend.PollEvents() {
 			wm.HandleEvent(e)

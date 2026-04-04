@@ -13,7 +13,8 @@ type TextEditor struct {
 	selStart CursorPos // anchor of selection
 	hasSel   bool
 
-	scrollY int // first visible line
+	scrollY   int        // first visible line
+	scrollbar *Scrollbar // vertical scrollbar
 
 	// Cursor blink
 	blinkTick int
@@ -30,14 +31,21 @@ type TextEditor struct {
 
 // NewTextEditor creates a text editor that renders into the given Form.
 func NewTextEditor(f *Form, text string) *TextEditor {
+	sb := NewScrollbar(f.Width()-scrollbarWidth, 0, f.Height())
 	return &TextEditor{
-		Buffer:   NewTextBuffer(text),
-		Form:     f,
-		blinkOn:  true,
-		PadX:     4,
-		PadY:     4,
-		TabWidth: 4,
+		Buffer:    NewTextBuffer(text),
+		Form:      f,
+		scrollbar: sb,
+		blinkOn:   true,
+		PadX:      4,
+		PadY:      4,
+		TabWidth:  4,
 	}
+}
+
+// textAreaWidth returns the width available for text (excluding scrollbar).
+func (te *TextEditor) textAreaWidth() int {
+	return te.Form.Width() - scrollbarWidth
 }
 
 // Cursor returns the current cursor position.
@@ -244,8 +252,7 @@ func (te *TextEditor) handleKey(key int) bool {
 		return true
 
 	case ebiten.KeyA:
-		if ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight) ||
-			ebiten.IsKeyPressed(ebiten.KeyControl) {
+		if isCmdOrCtrl() {
 			// Select all
 			te.selStart = CursorPos{0, 0}
 			lastLine := te.Buffer.LineCount() - 1
@@ -253,8 +260,63 @@ func (te *TextEditor) handleKey(key int) bool {
 			te.hasSel = true
 			return true
 		}
+
+	case ebiten.KeyC:
+		if isCmdOrCtrl() {
+			te.Copy()
+			return true
+		}
+
+	case ebiten.KeyX:
+		if isCmdOrCtrl() {
+			te.Cut()
+			return true
+		}
+
+	case ebiten.KeyV:
+		if isCmdOrCtrl() {
+			te.Paste()
+			return true
+		}
 	}
 	return false
+}
+
+func isCmdOrCtrl() bool {
+	return ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight) ||
+		ebiten.IsKeyPressed(ebiten.KeyControl)
+}
+
+// Copy copies the selected text to the clipboard.
+func (te *TextEditor) Copy() {
+	if te.hasSel {
+		ClipboardSet(te.Buffer.Selection(te.selStart, te.cursor))
+	}
+}
+
+// Cut copies the selected text to the clipboard and deletes it.
+func (te *TextEditor) Cut() {
+	if te.hasSel {
+		ClipboardSet(te.Buffer.Selection(te.selStart, te.cursor))
+		te.deleteSelection()
+		te.ensureCursorVisible()
+		te.fireChange()
+	}
+}
+
+// Paste inserts clipboard content at the cursor, replacing selection if any.
+func (te *TextEditor) Paste() {
+	text := ClipboardGet()
+	if text == "" {
+		return
+	}
+	if te.hasSel {
+		te.deleteSelection()
+	}
+	te.cursor = te.Buffer.Insert(te.cursor, text)
+	te.hasSel = false
+	te.ensureCursorVisible()
+	te.fireChange()
 }
 
 func (te *TextEditor) startSelIfShift(shift bool) {
@@ -266,6 +328,13 @@ func (te *TextEditor) startSelIfShift(shift bool) {
 
 // HandleClickLocal handles a click in editor-local coordinates.
 func (te *TextEditor) HandleClickLocal(localX, localY int, shift bool) {
+	// Check scrollbar first
+	if te.scrollbar.Contains(localX, localY) {
+		te.scrollbar.HandleClick(localX, localY)
+		te.scrollY = te.scrollbar.Offset
+		return
+	}
+
 	font := DefaultFont()
 	lh := font.LineHeight()
 
@@ -290,6 +359,20 @@ func (te *TextEditor) HandleClickLocal(localX, localY int, shift bool) {
 	}
 
 	te.cursor = te.Buffer.Clamp(CursorPos{Line: line, Col: col})
+}
+
+// HandleDragLocal handles a mouse drag in editor-local coordinates.
+func (te *TextEditor) HandleDragLocal(localX, localY int) {
+	if te.scrollbar.IsDragging() {
+		te.scrollbar.HandleDrag(localY)
+		te.scrollY = te.scrollbar.Offset
+		return
+	}
+}
+
+// HandleReleaseLocal handles mouse release.
+func (te *TextEditor) HandleReleaseLocal() {
+	te.scrollbar.HandleRelease()
 }
 
 // HandleDoubleClickLocal selects the word at the click position.
@@ -344,6 +427,10 @@ func (te *TextEditor) Render() {
 	font := DefaultFont()
 	lh := font.LineHeight()
 
+	// Sync scrollbar state
+	te.scrollbar.SetRange(te.Buffer.LineCount(), te.visibleLines())
+	te.scrollbar.Offset = te.scrollY
+
 	// Clear to white
 	f.Fill(ColorRGB(255, 255, 255))
 
@@ -389,6 +476,9 @@ func (te *TextEditor) Render() {
 			f.SetPixelAt(cx, cy+dy, black)
 		}
 	}
+
+	// Draw scrollbar
+	te.scrollbar.Render(f)
 }
 
 func (te *TextEditor) drawSelectionLine(f *Form, lineIdx, y int, lineText string, selMin, selMax CursorPos, selColor uint32, lh int) {

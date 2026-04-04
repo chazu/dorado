@@ -21,6 +21,13 @@ type WindowManager struct {
 	lastClickY    int
 	lastClickTick int
 	clickCount    int
+
+	// Active popup menu
+	activeMenu *Menu
+
+	// Menu providers
+	WorldMenuFunc   func(x, y int) []MenuItem           // right-click on desktop
+	WindowMenuFunc  func(w *Window, x, y int) []MenuItem // right-click in window content
 }
 
 // NewWindowManager creates a window manager that composites onto the given screen Form.
@@ -80,9 +87,24 @@ func (wm *WindowManager) Windows() []*Window {
 	return wm.windows
 }
 
+// CloseMenu dismisses any open popup menu.
+func (wm *WindowManager) CloseMenu() {
+	wm.activeMenu = nil
+}
+
+// HasMenu returns true if a popup menu is open.
+func (wm *WindowManager) HasMenu() bool {
+	return wm.activeMenu != nil
+}
+
 // HandleEvent processes an input event and updates window state.
 // Returns true if the event was consumed.
 func (wm *WindowManager) HandleEvent(e Event) bool {
+	// If a menu is open, it gets priority
+	if wm.activeMenu != nil {
+		return wm.handleMenuEvent(e)
+	}
+
 	switch e.Type {
 	case EventMouseDown:
 		return wm.handleMouseDown(e)
@@ -96,7 +118,37 @@ func (wm *WindowManager) HandleEvent(e Event) bool {
 	return false
 }
 
+func (wm *WindowManager) handleMenuEvent(e Event) bool {
+	m := wm.activeMenu
+	switch e.Type {
+	case EventMouseMove:
+		m.SetHover(e.X, e.Y)
+		return true
+	case EventMouseDown:
+		idx := m.ItemAt(e.X, e.Y)
+		if idx >= 0 && m.Items[idx].Action != nil {
+			action := m.Items[idx].Action
+			wm.activeMenu = nil
+			action()
+		} else {
+			wm.activeMenu = nil
+		}
+		return true
+	case EventKeyDown:
+		if ebiten.Key(e.Key) == ebiten.KeyEscape {
+			wm.activeMenu = nil
+			return true
+		}
+	}
+	return false
+}
+
 func (wm *WindowManager) handleMouseDown(e Event) bool {
+	// Right-click: open context menu
+	if e.Button == ButtonRight {
+		return wm.handleRightClick(e)
+	}
+
 	if e.Button != ButtonLeft {
 		return false
 	}
@@ -150,11 +202,40 @@ func (wm *WindowManager) handleMouseDown(e Event) bool {
 	return true
 }
 
+func (wm *WindowManager) handleRightClick(e Event) bool {
+	w := wm.WindowAt(e.X, e.Y)
+	if w == nil {
+		// Desktop right-click — world menu
+		if wm.WorldMenuFunc != nil {
+			items := wm.WorldMenuFunc(e.X, e.Y)
+			if len(items) > 0 {
+				wm.activeMenu = NewMenu(e.X, e.Y, items)
+			}
+		}
+		return true
+	}
+
+	// Window content right-click
+	zone := w.HitTest(e.X, e.Y)
+	if zone == HitContent && wm.WindowMenuFunc != nil {
+		items := wm.WindowMenuFunc(w, e.X, e.Y)
+		if len(items) > 0 {
+			wm.activeMenu = NewMenu(e.X, e.Y, items)
+		}
+	}
+	return true
+}
+
 func (wm *WindowManager) handleMouseUp(e Event) bool {
 	if wm.dragging != nil {
 		wm.dragging.MarkDirty()
 		wm.dragging = nil
 		return true
+	}
+	// Release scrollbar drag
+	if wm.focused != nil && wm.focused.Editor != nil {
+		wm.focused.Editor.HandleReleaseLocal()
+		wm.focused.MarkDirty()
 	}
 	return false
 }
@@ -164,6 +245,13 @@ func (wm *WindowManager) handleMouseMove(e Event) bool {
 		wm.dragging.X = e.X - wm.dragOffX
 		wm.dragging.Y = e.Y - wm.dragOffY
 		wm.dragging.MarkDirty()
+		return true
+	}
+	// Scrollbar drag
+	if wm.focused != nil && wm.focused.Editor != nil && wm.focused.Editor.scrollbar.IsDragging() {
+		_, ly := wm.focused.ScreenToContent(e.X, e.Y)
+		wm.focused.Editor.HandleDragLocal(e.X-wm.focused.X-wm.focused.contentX, ly)
+		wm.focused.MarkDirty()
 		return true
 	}
 	return false
@@ -198,5 +286,11 @@ func (wm *WindowManager) Composite(bgColor uint32) {
 		w := wm.windows[i]
 		form := w.Render()
 		CopyBits(wm.screen, w.X, w.Y, form)
+	}
+
+	// Draw popup menu on top of everything
+	if wm.activeMenu != nil {
+		menuForm := wm.activeMenu.Render()
+		CopyBits(wm.screen, wm.activeMenu.X, wm.activeMenu.Y, menuForm)
 	}
 }
