@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/chazu/dorado/go/display"
@@ -21,12 +22,15 @@ const (
 	screenH = 960
 )
 
+var workspaceCounter int
+
 // app holds the global application state.
 var app struct {
 	vm      *vm.VM
 	screen  *display.Form
 	wm      *display.WindowManager
 	backend *display.EbitengineBackend
+	lsp     *display.LSPClient
 }
 
 func main() {
@@ -51,6 +55,9 @@ func main() {
 		p := &pipeline.Pipeline{VM: v}
 		return p.CompilePath(dirPath + "/...")
 	})
+
+	// Start LSP server for code intelligence
+	startLSP()
 
 	// Create display
 	screen := display.NewForm(screenW, screenH)
@@ -113,6 +120,11 @@ func main() {
 	if err := backend.Run(); err != nil {
 		log.Fatal(err)
 	}
+
+	// Cleanup
+	if app.lsp != nil {
+		app.lsp.Close()
+	}
 }
 
 func runMaggieMain(vmInst *vm.VM) {
@@ -160,6 +172,7 @@ func createDefaultLayout(wm *display.WindowManager) {
 'Hello, ' , 'Dorado!'.
 `)
 	wsEditor.SyntaxHighlight = true
+	connectLSP(wsEditor, "file:///workspace/default.mag")
 	wm.AddWindow(ws)
 }
 
@@ -171,6 +184,8 @@ func worldMenu(x, y int) []display.MenuItem {
 			w := display.NewWindow(x, y, 500, 380, "Workspace")
 			e := w.SetEditor("")
 			e.SyntaxHighlight = true
+			connectLSP(e, fmt.Sprintf("file:///workspace/%d.mag", workspaceCounter))
+			workspaceCounter++
 			app.wm.AddWindow(w)
 		}},
 		{Label: "System Browser", Action: func() {
@@ -383,6 +398,46 @@ func handleGlobalShortcut(e display.Event) bool {
 		return true
 	}
 	return false
+}
+
+// --- LSP ---
+
+func startLSP() {
+	// Try to find the mag binary
+	magPath, err := exec.LookPath("mag")
+	if err != nil {
+		fmt.Println("LSP: mag binary not found in PATH, code intelligence disabled")
+		return
+	}
+
+	client := display.NewLSPClient(magPath, "lsp")
+	if client == nil {
+		fmt.Println("LSP: failed to start mag lsp")
+		return
+	}
+
+	// Get working directory as root URI
+	cwd, _ := os.Getwd()
+	rootURI := "file://" + cwd
+
+	if err := client.Initialize(rootURI); err != nil {
+		fmt.Printf("LSP: initialize failed: %v\n", err)
+		client.Close()
+		return
+	}
+
+	app.lsp = client
+	fmt.Println("LSP: connected to mag lsp")
+}
+
+// connectLSP attaches the LSP client to an editor with a given document URI.
+func connectLSP(editor *display.TextEditor, uri string) {
+	if app.lsp == nil {
+		return
+	}
+	editor.LSP = app.lsp
+	editor.DocumentURI = uri
+	editor.NotifyOpen()
 }
 
 // --- Notifier ---

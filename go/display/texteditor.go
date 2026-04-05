@@ -69,6 +69,16 @@ type TextEditor struct {
 	TabWidth       int
 	SyntaxHighlight bool // enable Maggie syntax coloring
 
+	// LSP integration
+	LSP        *LSPClient // optional LSP client for completion/hover
+	DocumentURI string    // URI for LSP notifications
+	docVersion  int       // incremented on each change
+
+	// Completion popup
+	completions    []LSPCompletionItem
+	completionIdx  int
+	showCompletion bool
+
 	// Callbacks
 	OnChange func(text string)
 }
@@ -462,6 +472,30 @@ func (te *TextEditor) handleKey(key int) bool {
 		}
 	}
 
+	// --- Completion popup navigation ---
+	if te.showCompletion {
+		switch k {
+		case ebiten.KeyDown:
+			if te.completionIdx < len(te.completions)-1 {
+				te.completionIdx++
+			}
+			return true
+		case ebiten.KeyUp:
+			if te.completionIdx > 0 {
+				te.completionIdx--
+			}
+			return true
+		case ebiten.KeyEnter, ebiten.KeyNumpadEnter, ebiten.KeyTab:
+			te.acceptCompletion()
+			return true
+		case ebiten.KeyEscape:
+			te.showCompletion = false
+			return true
+		}
+		// Any other key dismisses completion and falls through
+		te.showCompletion = false
+	}
+
 	// --- Standard keys ---
 	switch k {
 	case ebiten.KeyBackspace:
@@ -504,6 +538,15 @@ func (te *TextEditor) handleKey(key int) bool {
 		}
 		te.lastWasKill = false
 		te.ensureCursorVisible()
+		return true
+
+	case ebiten.KeyTab:
+		if te.LSP != nil && te.LSP.IsRunning() {
+			te.triggerCompletion()
+			return true
+		}
+		// No LSP: insert spaces
+		te.insertChar('\t')
 		return true
 
 	case ebiten.KeyHome:
@@ -781,9 +824,73 @@ func (te *TextEditor) colFromX(line, px int) int {
 }
 
 func (te *TextEditor) fireChange() {
+	// Notify LSP of document change
+	if te.LSP != nil && te.LSP.IsRunning() && te.DocumentURI != "" {
+		te.docVersion++
+		te.LSP.DidChange(te.DocumentURI, te.Buffer.Text(), te.docVersion)
+	}
 	if te.OnChange != nil {
 		te.OnChange(te.Buffer.Text())
 	}
+}
+
+// triggerCompletion requests completions from the LSP.
+func (te *TextEditor) triggerCompletion() {
+	if te.LSP == nil || !te.LSP.IsRunning() {
+		return
+	}
+	items := te.LSP.Complete(te.DocumentURI, te.cursor.Line, te.cursor.Col)
+	if len(items) == 0 {
+		te.showCompletion = false
+		// Fallback: insert tab
+		te.insertChar('\t')
+		return
+	}
+	te.completions = items
+	te.completionIdx = 0
+	te.showCompletion = true
+}
+
+// acceptCompletion inserts the selected completion item.
+func (te *TextEditor) acceptCompletion() {
+	if !te.showCompletion || te.completionIdx >= len(te.completions) {
+		te.showCompletion = false
+		return
+	}
+	item := te.completions[te.completionIdx]
+	te.showCompletion = false
+
+	// Find the word prefix to replace
+	runes := []rune(te.Buffer.Line(te.cursor.Line))
+	wordStart := te.cursor.Col
+	for wordStart > 0 && isIdentChar(runes[wordStart-1]) {
+		wordStart--
+	}
+
+	// Delete the prefix and insert the completion
+	if wordStart < te.cursor.Col {
+		start := CursorPos{te.cursor.Line, wordStart}
+		te.cursor = te.Buffer.Delete(start, te.cursor)
+	}
+	te.cursor = te.Buffer.Insert(te.cursor, item.Label)
+	te.ensureCursorVisible()
+	te.saveUndo()
+	te.fireChange()
+}
+
+// NotifyOpen tells the LSP that this document is open.
+func (te *TextEditor) NotifyOpen() {
+	if te.LSP != nil && te.LSP.IsRunning() && te.DocumentURI != "" {
+		te.LSP.DidOpen(te.DocumentURI, te.Buffer.Text())
+	}
+}
+
+// HoverAt returns hover info at the cursor position.
+func (te *TextEditor) HoverAt() string {
+	if te.LSP == nil || !te.LSP.IsRunning() {
+		return ""
+	}
+	return te.LSP.Hover(te.DocumentURI, te.cursor.Line, te.cursor.Col)
 }
 
 // --- Rendering ---
@@ -844,6 +951,68 @@ func (te *TextEditor) Render() {
 	}
 
 	te.scrollbar.Render(f)
+
+	// Draw completion popup
+	if te.showCompletion && len(te.completions) > 0 {
+		te.renderCompletionPopup(f, font, lh)
+	}
+}
+
+func (te *TextEditor) renderCompletionPopup(f *Form, font *Font, lh int) {
+	popupBG := ColorRGB(255, 255, 240)
+	popupBorder := ColorRGB(140, 140, 140)
+	popupSelBG := ColorRGB(40, 40, 120)
+	popupSelFG := ColorRGB(255, 255, 255)
+	popupFG := ColorRGB(0, 0, 0)
+	detailFG := ColorRGB(120, 120, 120)
+
+	// Position below cursor
+	cx := te.PadX + te.xFromCol(te.cursor.Line, te.cursor.Col)
+	cy := te.PadY + (te.cursor.Line-te.scrollY+1)*lh
+
+	maxVisible := 8
+	if len(te.completions) < maxVisible {
+		maxVisible = len(te.completions)
+	}
+
+	itemH := lh + 2
+	popupW := 250
+	popupH := maxVisible*itemH + 4
+
+	// Keep popup in bounds
+	if cx+popupW > f.Width() {
+		cx = f.Width() - popupW
+	}
+	if cy+popupH > f.Height() {
+		cy = te.PadY + (te.cursor.Line-te.scrollY)*lh - popupH
+	}
+
+	f.FillRectWH(popupBG, cx, cy, popupW, popupH)
+	drawRectOutline(f, cx, cy, popupW, popupH, popupBorder)
+
+	// Scroll the list if needed
+	scrollOff := 0
+	if te.completionIdx >= maxVisible {
+		scrollOff = te.completionIdx - maxVisible + 1
+	}
+
+	for i := 0; i < maxVisible && scrollOff+i < len(te.completions); i++ {
+		item := te.completions[scrollOff+i]
+		iy := cy + 2 + i*itemH
+		idx := scrollOff + i
+
+		fg := popupFG
+		if idx == te.completionIdx {
+			f.FillRectWH(popupSelBG, cx+1, iy, popupW-2, itemH)
+			fg = popupSelFG
+		}
+
+		DrawStringFont(f, cx+6, iy+1, item.Label, fg, font)
+		if item.Detail != "" {
+			detailX := cx + 6 + font.MeasureString(item.Label) + 8
+			DrawStringFont(f, detailX, iy+1, item.Detail, detailFG, font)
+		}
+	}
 }
 
 func (te *TextEditor) drawSelectionLine(f *Form, lineIdx, y int, lineText string, selMin, selMax CursorPos, selColor uint32, lh int) {

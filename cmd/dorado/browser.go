@@ -68,6 +68,7 @@ func openBrowser() {
 	b.codeForm = display.NewForm(contentW, codeH)
 	b.codeEditor = display.NewTextEditor(b.codeForm, "")
 	b.codeEditor.SyntaxHighlight = true
+	connectLSP(b.codeEditor, "file:///browser/code.mag")
 	b.codeEditor.OnChange = func(_ string) {
 		b.dirty = true
 	}
