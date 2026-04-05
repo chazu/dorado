@@ -1,8 +1,6 @@
 package display
 
 import (
-	"fmt"
-
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
@@ -218,8 +216,6 @@ func (wm *WindowManager) handleMenuEvent(e Event) bool {
 }
 
 func (wm *WindowManager) handleMouseDown(e Event) bool {
-	fmt.Printf("MOUSE-DOWN button=%d at (%d,%d)\n", e.Button, e.X, e.Y)
-
 	// Right-click: open context menu
 	if e.Button == ButtonRight {
 		return wm.handleRightClick(e)
@@ -296,14 +292,10 @@ func (wm *WindowManager) handleMouseDown(e Event) bool {
 }
 
 func (wm *WindowManager) handleRightClick(e Event) bool {
-	fmt.Printf("RIGHT-CLICK at (%d, %d) button=%d\n", e.X, e.Y, e.Button)
-
 	w := wm.WindowAt(e.X, e.Y)
 	if w == nil {
-		fmt.Printf("  → no window, showing world menu (func=%v)\n", wm.WorldMenuFunc != nil)
 		if wm.WorldMenuFunc != nil {
 			items := wm.WorldMenuFunc(e.X, e.Y)
-			fmt.Printf("  → got %d menu items\n", len(items))
 			if len(items) > 0 {
 				wm.activeMenu = NewMenu(e.X, e.Y, items)
 			}
@@ -311,11 +303,9 @@ func (wm *WindowManager) handleRightClick(e Event) bool {
 		return true
 	}
 
-	fmt.Printf("  → hit window %q\n", w.Title)
 	zone := w.HitTest(e.X, e.Y)
 	if zone == HitContent && wm.WindowMenuFunc != nil {
 		items := wm.WindowMenuFunc(w, e.X, e.Y)
-		fmt.Printf("  → content click, got %d menu items\n", len(items))
 		if len(items) > 0 {
 			wm.activeMenu = NewMenu(e.X, e.Y, items)
 		}
