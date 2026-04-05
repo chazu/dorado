@@ -365,8 +365,9 @@ func getEvalSource(te *display.TextEditor) string {
 
 func handleGlobalShortcut(e display.Event) bool {
 	k := ebiten.Key(e.Key)
-	cmd := ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight) ||
-		ebiten.IsKeyPressed(ebiten.KeyControl)
+	// Only Cmd (Meta) triggers global shortcuts, NOT Ctrl.
+	// Ctrl is reserved for Emacs keybindings in the text editor.
+	cmd := ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight)
 	if !cmd {
 		return false
 	}
