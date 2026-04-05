@@ -64,9 +64,10 @@ type TextEditor struct {
 	dragging bool
 
 	// Appearance
-	PadX     int
-	PadY     int
-	TabWidth int
+	PadX           int
+	PadY           int
+	TabWidth       int
+	SyntaxHighlight bool // enable Maggie syntax coloring
 
 	// Callbacks
 	OnChange func(text string)
@@ -826,7 +827,11 @@ func (te *TextEditor) Render() {
 			te.drawSelectionLine(f, lineIdx, y, lineText, selMin, selMax, selColor, lh)
 		}
 
-		DrawStringFont(f, te.PadX, y, lineText, black, font)
+		if te.SyntaxHighlight {
+			DrawStringHighlighted(f, te.PadX, y, lineText, font)
+		} else {
+			DrawStringFont(f, te.PadX, y, lineText, black, font)
+		}
 	}
 
 	// Draw cursor

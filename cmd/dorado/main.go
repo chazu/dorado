@@ -147,7 +147,7 @@ func createDefaultLayout(wm *display.WindowManager) {
 
 	// Workspace
 	ws := display.NewWindow(40, 40, 600, 500, "Workspace")
-	ws.SetEditor(`"Welcome to Dorado — the ST-80 IDE for Maggie."
+	wsEditor := ws.SetEditor(`"Welcome to Dorado — the ST-80 IDE for Maggie."
 "Select an expression and press Cmd+D to evaluate (Do it),"
 "or Cmd+P to evaluate and print the result (Print it)."
 
@@ -159,6 +159,7 @@ func createDefaultLayout(wm *display.WindowManager) {
 
 'Hello, ' , 'Dorado!'.
 `)
+	wsEditor.SyntaxHighlight = true
 	wm.AddWindow(ws)
 }
 
@@ -168,11 +169,15 @@ func worldMenu(x, y int) []display.MenuItem {
 	return []display.MenuItem{
 		{Label: "New Workspace", Action: func() {
 			w := display.NewWindow(x, y, 500, 380, "Workspace")
-			w.SetEditor("")
+			e := w.SetEditor("")
+			e.SyntaxHighlight = true
 			app.wm.AddWindow(w)
 		}},
 		{Label: "System Browser", Action: func() {
 			openBrowser()
+		}},
+		{Label: "File List", Action: func() {
+			openFileList()
 		}},
 		{Label: "New Transcript", Action: func() {
 			w := display.NewWindow(x, y, 500, 300, "Transcript")
@@ -245,7 +250,7 @@ func windowMenu(w *display.Window, x, y int) []display.MenuItem {
 func doIt(w *display.Window) {
 	defer func() {
 		if r := recover(); r != nil {
-			transcriptWrite(fmt.Sprintf("Do it error (panic): %v", r))
+			showNotifier(fmt.Sprintf("%v", r))
 		}
 	}()
 
@@ -259,7 +264,7 @@ func doIt(w *display.Window) {
 
 	_, _, err := evalExpression(app.vm, source)
 	if err != nil {
-		transcriptWrite("Error: " + err.Error())
+		showNotifier(err.Error())
 	}
 	w.MarkDirty()
 }
@@ -267,7 +272,7 @@ func doIt(w *display.Window) {
 func inspectIt(w *display.Window) {
 	defer func() {
 		if r := recover(); r != nil {
-			transcriptWrite(fmt.Sprintf("Inspect error (panic): %v", r))
+			showNotifier(fmt.Sprintf("%v", r))
 		}
 	}()
 
@@ -294,7 +299,7 @@ func inspectIt(w *display.Window) {
 func printIt(w *display.Window) {
 	defer func() {
 		if r := recover(); r != nil {
-			transcriptWrite(fmt.Sprintf("Print it error (panic): %v", r))
+			showNotifier(fmt.Sprintf("%v", r))
 		}
 	}()
 
@@ -378,6 +383,14 @@ func handleGlobalShortcut(e display.Event) bool {
 		return true
 	}
 	return false
+}
+
+// --- Notifier ---
+
+func showNotifier(message string) {
+	transcriptWrite("Error: " + message)
+	d := display.NewConfirmDialog("Error", message, func(_ string) {}, nil)
+	app.wm.ShowDialog(d)
 }
 
 // --- Transcript ---
@@ -465,6 +478,35 @@ func registerDisplayPrimitives(vmInst *vm.VM, wm *display.WindowManager) {
 	displayClass.AddClassMethod1(vmInst.Selectors, "transcript:", func(vmPtr interface{}, recv vm.Value, textVal vm.Value) vm.Value {
 		v := vmPtr.(*vm.VM)
 		text := v.Registry().GetStringContent(textVal)
+		transcriptWrite(text)
+		return vm.Nil
+	})
+
+	// Register Transcript show: as a native Maggie global
+	// This overrides any existing Transcript class to route output to the Dorado Transcript window.
+	transcriptClass := vmInst.Classes.Lookup("Transcript")
+	if transcriptClass == nil {
+		transcriptClass = vm.NewClass("Transcript", vmInst.ObjectClass)
+		vmInst.Classes.Register(transcriptClass)
+	}
+	vmInst.SetGlobal("Transcript", vmInst.ClassValue(transcriptClass))
+
+	transcriptClass.AddClassMethod1(vmInst.Selectors, "show:", func(vmPtr interface{}, recv vm.Value, textVal vm.Value) vm.Value {
+		v := vmPtr.(*vm.VM)
+		text := valuePrintString(v, textVal)
+		transcriptWrite(text)
+		return vm.Nil
+	})
+
+	transcriptClass.AddClassMethod0(vmInst.Selectors, "cr", func(_ interface{}, _ vm.Value) vm.Value {
+		transcriptWrite("")
+		return vm.Nil
+	})
+
+	// Transcript print: (alias for show:)
+	transcriptClass.AddClassMethod1(vmInst.Selectors, "print:", func(vmPtr interface{}, recv vm.Value, textVal vm.Value) vm.Value {
+		v := vmPtr.(*vm.VM)
+		text := valuePrintString(v, textVal)
 		transcriptWrite(text)
 		return vm.Nil
 	})

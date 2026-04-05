@@ -38,6 +38,10 @@ type WindowManager struct {
 
 	// Software cursor
 	cursor *Cursor
+
+	// Modal dialog
+	activeDialog  *Dialog
+	dialogX, dialogY int
 }
 
 // NewWindowManager creates a window manager that composites onto the given screen Form.
@@ -100,6 +104,11 @@ func (wm *WindowManager) Windows() []*Window {
 	return wm.windows
 }
 
+// ShowDialog displays a modal dialog.
+func (wm *WindowManager) ShowDialog(d *Dialog) {
+	wm.activeDialog = d
+}
+
 // CloseMenu dismisses any open popup menu.
 func (wm *WindowManager) CloseMenu() {
 	wm.activeMenu = nil
@@ -118,6 +127,19 @@ func (wm *WindowManager) HandleEvent(e Event) bool {
 		wm.cursor.X = e.X
 		wm.cursor.Y = e.Y
 		wm.updateCursorShape(e.X, e.Y)
+	}
+
+	// Modal dialog gets priority over everything
+	if wm.activeDialog != nil && !wm.activeDialog.Dismissed {
+		if e.Type == EventMouseDown {
+			wm.activeDialog.HandleClickAt(e.X, e.Y, wm.dialogX, wm.dialogY)
+		} else {
+			wm.activeDialog.HandleEvent(e)
+		}
+		if wm.activeDialog.Dismissed {
+			wm.activeDialog = nil
+		}
+		return true
 	}
 
 	// If a menu is open, it gets priority
@@ -389,6 +411,14 @@ func (wm *WindowManager) Composite(bgColor uint32) {
 	if wm.activeMenu != nil {
 		menuForm := wm.activeMenu.Render()
 		CopyBits(wm.screen, wm.activeMenu.X, wm.activeMenu.Y, menuForm)
+	}
+
+	// Draw modal dialog
+	if wm.activeDialog != nil && !wm.activeDialog.Dismissed {
+		dForm, dx, dy := wm.activeDialog.Render(wm.screen.Width(), wm.screen.Height())
+		wm.dialogX = dx
+		wm.dialogY = dy
+		CopyBits(wm.screen, dx, dy, dForm)
 	}
 
 	// Draw software cursor on top

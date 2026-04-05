@@ -67,6 +67,7 @@ func openBrowser() {
 	codeH := contentH - 150 // top panes + button bar
 	b.codeForm = display.NewForm(contentW, codeH)
 	b.codeEditor = display.NewTextEditor(b.codeForm, "")
+	b.codeEditor.SyntaxHighlight = true
 	b.codeEditor.OnChange = func(_ string) {
 		b.dirty = true
 	}
