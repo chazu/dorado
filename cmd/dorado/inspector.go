@@ -103,97 +103,66 @@ func (insp *Inspector) buildEntries() {
 	val := insp.object
 	v := insp.vmInst
 
-	// Try to get instance variables via the object's slots
+	// First, determine the class so we know what kind of entries to build
+	className := valueClassName(v, val)
+
+	// For objects with named instance variables, show those
+	hasNamedIvars := false
 	if val.IsObject() {
 		obj := vm.ObjectFromValue(val)
 		if obj != nil {
 			class := v.GetClassFromValue(val)
 			if class != nil {
 				ivars := class.AllInstVarNames()
-				for i, name := range ivars {
-					if i < obj.NumSlots() {
+				if len(ivars) > 0 {
+					hasNamedIvars = true
+					for i, name := range ivars {
+						if i < obj.NumSlots() {
+							insp.entries = append(insp.entries, inspectorEntry{
+								Name:  name,
+								Value: obj.GetSlot(i),
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Type-specific entries (only if we didn't already get named ivars)
+	if !hasNamedIvars {
+		switch className {
+		case "SmallInteger", "BigInteger":
+			insp.addComputedEntry("decimal", val)
+			insp.addSendEntry(val, "even", "even")
+			insp.addSendEntry(val, "odd", "odd")
+		case "String":
+			insp.addSendEntry(val, "size", "size")
+			if vm.IsStringValue(val) {
+				str := v.Registry().GetStringContent(val)
+				insp.entries = append(insp.entries, inspectorEntry{
+					Name: "contents", Value: val,
+				})
+				if len([]rune(str)) <= 20 {
+					for i, ch := range str {
 						insp.entries = append(insp.entries, inspectorEntry{
-							Name:  name,
-							Value: obj.GetSlot(i),
+							Name:  fmt.Sprintf("[%d]", i),
+							Value: v.Registry().NewStringValue(string(ch)),
 						})
 					}
 				}
 			}
-			// If no named ivars but has slots, show indexed slots
-			if len(insp.entries) == 0 {
-				for i := 0; i < obj.NumSlots() && i < 50; i++ {
-					insp.entries = append(insp.entries, inspectorEntry{
-						Name:  fmt.Sprintf("[%d]", i),
-						Value: obj.GetSlot(i),
-					})
-				}
-			}
-		}
-	}
-
-	// Use Maggie introspection to get more information
-	// Try sending instVarNames and instVarAt: for richer inspection
-	if len(insp.entries) == 0 {
-		insp.addIntrospectedEntries(val)
-	}
-
-	// Always add useful derived properties based on the type
-	className := valueClassName(v, val)
-	switch className {
-	case "SmallInteger", "BigInteger":
-		insp.addComputedEntry("decimal", val)
-		insp.addSendEntry(val, "printString", "printString")
-		insp.addSendEntry(val, "even", "even")
-		insp.addSendEntry(val, "odd", "odd")
-		insp.addSendEntry(val, "class", "class")
-	case "Float":
-		insp.addSendEntry(val, "printString", "printString")
-		insp.addSendEntry(val, "class", "class")
-	case "String":
-		insp.addSendEntry(val, "size", "size")
-		insp.addSendEntry(val, "class", "class")
-		// Show the string contents
-		if vm.IsStringValue(val) {
-			str := v.Registry().GetStringContent(val)
-			insp.entries = append(insp.entries, inspectorEntry{
-				Name: "contents", Value: val,
-			})
-			// Show individual characters for short strings
-			if len([]rune(str)) <= 20 {
-				for i, ch := range str {
-					insp.entries = append(insp.entries, inspectorEntry{
-						Name:  fmt.Sprintf("[%d]", i),
-						Value: v.Registry().NewStringValue(string(ch)),
-					})
-				}
-			}
-		}
-	case "Symbol":
-		insp.addSendEntry(val, "class", "class")
-	case "Array":
-		insp.addSendEntry(val, "size", "size")
-		insp.addSendEntry(val, "class", "class")
-		insp.addArrayElements(val)
-	case "ArrayList":
-		insp.addSendEntry(val, "size", "size")
-		insp.addSendEntry(val, "class", "class")
-		insp.addArrayListElements(val)
-	case "Dictionary":
-		insp.addSendEntry(val, "size", "size")
-		insp.addSendEntry(val, "class", "class")
-		insp.addDictionaryEntries(val)
-	case "Set":
-		insp.addSendEntry(val, "size", "size")
-		insp.addSendEntry(val, "class", "class")
-	case "True", "False":
-		insp.addSendEntry(val, "class", "class")
-	case "UndefinedObject":
-		// nil — nothing much to show
-	default:
-		// For unknown types, try common messages
-		if len(insp.entries) == 0 {
-			insp.addSendEntry(val, "class", "class")
-			insp.addSendEntry(val, "printString", "printString")
+		case "Array":
+			insp.addSendEntry(val, "size", "size")
+			insp.addArrayElements(val)
+		case "ArrayList":
+			insp.addSendEntry(val, "size", "size")
+			insp.addArrayListElements(val)
+		case "Dictionary":
+			insp.addSendEntry(val, "size", "size")
+			insp.addDictionaryEntries(val)
+		case "Set":
+			insp.addSendEntry(val, "size", "size")
 		}
 	}
 }
