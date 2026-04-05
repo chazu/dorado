@@ -98,23 +98,33 @@ func main() {
 
 	colorBG := display.ColorRGB(168, 168, 168)
 
+	// Handle window resize from tiling WM or manual resize
+	backend.OnResize = func(w, h int) {
+		app.screen = backend.Screen()
+		app.wm = display.NewWindowManager(app.screen)
+		// Re-apply menus
+		app.wm.WorldMenuFunc = worldMenu
+		app.wm.WindowMenuFunc = windowMenu
+		// Re-add all existing windows would be complex, so just create fresh layout
+		createDefaultLayout(app.wm)
+		fmt.Printf("Resized to %dx%d\n", w, h)
+	}
+
 	backend.OnUpdate = func() {
 		for _, e := range backend.PollEvents() {
-			// Handle Cmd+D (do it) and Cmd+P (print it) globally
-			if e.Type == display.EventKeyDown && !wm.HasMenu() {
+			if e.Type == display.EventKeyDown && !app.wm.HasMenu() {
 				if handleGlobalShortcut(e) {
 					continue
 				}
 			}
-			wm.HandleEvent(e)
+			app.wm.HandleEvent(e)
 		}
 
-		// Refresh debugger if active
 		if debugger != nil && debugger.active {
 			refreshDebugger()
 		}
 
-		wm.Composite(colorBG)
+		app.wm.Composite(colorBG)
 	}
 
 	if err := backend.Run(); err != nil {
