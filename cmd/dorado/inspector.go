@@ -18,20 +18,17 @@ type inspectorEntry struct {
 type Inspector struct {
 	window   *display.Window
 	vmInst   *vm.VM
-	object   vm.Value // the inspected object
+	object   vm.Value
 	entries  []inspectorEntry
-	selIndex int // selected entry (-1 = self)
+	selIndex int // -1 = self
 
-	// Layout
 	listPaneW int
 	listPaneH int
 
-	// Eval pane
 	evalForm   *display.Form
 	evalEditor *display.TextEditor
 }
 
-// inspectorRegistry maps windows to their Inspector instances.
 var inspectorRegistry = map[*display.Window]*Inspector{}
 
 func getInspectorForWindow(w *display.Window) *Inspector {
@@ -44,17 +41,9 @@ func inspectorMenu(insp *Inspector) []display.MenuItem {
 		{Label: "Print it  (⌘P)", Action: func() { insp.printIt() }},
 		{Label: "Inspect it  (⌘I)", Action: func() { insp.inspectSelected() }},
 		display.Separator(),
-		{Label: "Cut", Action: func() {
-			insp.evalEditor.Cut()
-			insp.render()
-		}},
-		{Label: "Copy", Action: func() {
-			insp.evalEditor.Copy()
-		}},
-		{Label: "Paste", Action: func() {
-			insp.evalEditor.Paste()
-			insp.render()
-		}},
+		{Label: "Cut", Action: func() { insp.evalEditor.Cut(); insp.render() }},
+		{Label: "Copy", Action: func() { insp.evalEditor.Copy() }},
+		{Label: "Paste", Action: func() { insp.evalEditor.Paste(); insp.render() }},
 	}
 }
 
@@ -81,10 +70,7 @@ func openInspector(vmInst *vm.VM, val vm.Value) {
 
 	w.Content = display.NewForm(contentW, contentH)
 
-	w.OnContentClick = func(lx, ly int) {
-		insp.handleClick(lx, ly)
-	}
-
+	w.OnContentClick = func(lx, ly int) { insp.handleClick(lx, ly) }
 	w.OnKeyEvent = func(e display.Event) bool {
 		consumed := insp.evalEditor.HandleEvent(e)
 		if consumed {
@@ -98,166 +84,81 @@ func openInspector(vmInst *vm.VM, val vm.Value) {
 	app.wm.AddWindow(w)
 }
 
+// buildEntries uses generic Maggie introspection — no type-switching.
+// Every object responds to: class, instVarSize, instVarAt:
+// Every class responds to: allInstVarNames
 func (insp *Inspector) buildEntries() {
 	insp.entries = nil
 	val := insp.object
 	v := insp.vmInst
 
-	// First, determine the class so we know what kind of entries to build
-	className := valueClassName(v, val)
+	// Get the class and instance variable names via message sends
+	classVal := safeSend(v, val, "class", nil)
+	ivarNames := safeSend(v, classVal, "allInstVarNames", nil)
 
-	// For objects with named instance variables, show those
-	hasNamedIvars := false
-	if val.IsObject() {
-		obj := vm.ObjectFromValue(val)
-		if obj != nil {
-			class := v.GetClassFromValue(val)
-			if class != nil {
-				ivars := class.AllInstVarNames()
-				if len(ivars) > 0 {
-					hasNamedIvars = true
-					for i, name := range ivars {
-						if i < obj.NumSlots() {
-							insp.entries = append(insp.entries, inspectorEntry{
-								Name:  name,
-								Value: obj.GetSlot(i),
-							})
-						}
-					}
-				}
-			}
+	// Get instance variable count
+	ivarSize := safeSendInt(v, val, "instVarSize")
+
+	// Get the ivar name list as Go strings
+	var names []string
+	if ivarNames != vm.Nil {
+		nameCount := safeSendInt(v, ivarNames, "size")
+		for i := 0; i < nameCount; i++ {
+			nameVal := safeSend(v, ivarNames, "at:", []vm.Value{vm.FromSmallInt(int64(i))})
+			names = append(names, valuePrintString(v, nameVal))
 		}
 	}
 
-	// Type-specific entries (only if we didn't already get named ivars)
-	if !hasNamedIvars {
-		switch className {
-		case "SmallInteger", "BigInteger":
-			insp.addComputedEntry("decimal", val)
-			insp.addSendEntry(val, "even", "even")
-			insp.addSendEntry(val, "odd", "odd")
-		case "String":
-			insp.addSendEntry(val, "size", "size")
-			if vm.IsStringValue(val) {
-				str := v.Registry().GetStringContent(val)
+	// Build entries: named ivars first, then any extra indexed slots
+	for i := 0; i < ivarSize; i++ {
+		name := fmt.Sprintf("[%d]", i)
+		if i < len(names) {
+			name = names[i]
+		}
+		slotVal := safeSend(v, val, "instVarAt:", []vm.Value{vm.FromSmallInt(int64(i))})
+		insp.entries = append(insp.entries, inspectorEntry{
+			Name:  name,
+			Value: slotVal,
+		})
+	}
+
+	// For indexable collections (respond to size and at:), show elements
+	// Only if we didn't already get slots above
+	if ivarSize == 0 {
+		collSize := safeSendInt(v, val, "size")
+		if collSize > 0 {
+			// Cap at 100 elements
+			if collSize > 100 {
+				collSize = 100
+			}
+			for i := 0; i < collSize; i++ {
+				elem := safeSend(v, val, "at:", []vm.Value{vm.FromSmallInt(int64(i))})
 				insp.entries = append(insp.entries, inspectorEntry{
-					Name: "contents", Value: val,
+					Name:  fmt.Sprintf("[%d]", i),
+					Value: elem,
 				})
-				if len([]rune(str)) <= 20 {
-					for i, ch := range str {
-						insp.entries = append(insp.entries, inspectorEntry{
-							Name:  fmt.Sprintf("[%d]", i),
-							Value: v.Registry().NewStringValue(string(ch)),
-						})
-					}
-				}
 			}
-		case "Array":
-			insp.addSendEntry(val, "size", "size")
-			insp.addArrayElements(val)
-		case "ArrayList":
-			insp.addSendEntry(val, "size", "size")
-			insp.addArrayListElements(val)
-		case "Dictionary":
-			insp.addSendEntry(val, "size", "size")
-			insp.addDictionaryEntries(val)
-		case "Set":
-			insp.addSendEntry(val, "size", "size")
 		}
 	}
 }
 
-func (insp *Inspector) addIntrospectedEntries(val vm.Value) {
-	defer func() { recover() }()
-
-	// Try instVarSize to see if there are slots to inspect
-	sizeResult := insp.vmInst.Send(val, "instVarSize", nil)
-	if sizeResult.IsSmallInt() {
-		n := int(sizeResult.SmallInt())
-		for i := 0; i < n && i < 50; i++ {
-			slotResult := insp.vmInst.Send(val, "instVarAt:", []vm.Value{vm.FromSmallInt(int64(i))})
-			insp.entries = append(insp.entries, inspectorEntry{
-				Name:  fmt.Sprintf("slot[%d]", i),
-				Value: slotResult,
-			})
+// safeSend sends a message and recovers from panics, returning Nil on failure.
+func safeSend(v *vm.VM, recv vm.Value, selector string, args []vm.Value) (result vm.Value) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = vm.Nil
 		}
-	}
+	}()
+	return v.Send(recv, selector, args)
 }
 
-func (insp *Inspector) addSendEntry(val vm.Value, selector, label string) {
-	defer func() { recover() }()
-	result := insp.vmInst.Send(val, selector, nil)
-	insp.entries = append(insp.entries, inspectorEntry{
-		Name:  label,
-		Value: result,
-	})
-}
-
-func (insp *Inspector) addComputedEntry(label string, val vm.Value) {
-	insp.entries = append(insp.entries, inspectorEntry{
-		Name:  label,
-		Value: val,
-	})
-}
-
-func (insp *Inspector) addArrayElements(val vm.Value) {
-	defer func() { recover() }()
-	sizeVal := insp.vmInst.Send(val, "size", nil)
-	if !sizeVal.IsSmallInt() {
-		return
+// safeSendInt sends a message expecting a SmallInteger result, returns 0 on failure.
+func safeSendInt(v *vm.VM, recv vm.Value, selector string) int {
+	result := safeSend(v, recv, selector, nil)
+	if result.IsSmallInt() {
+		return int(result.SmallInt())
 	}
-	n := int(sizeVal.SmallInt())
-	if n > 50 {
-		n = 50
-	}
-	for i := 0; i < n; i++ {
-		elem := insp.vmInst.Send(val, "at:", []vm.Value{vm.FromSmallInt(int64(i))})
-		insp.entries = append(insp.entries, inspectorEntry{
-			Name:  fmt.Sprintf("[%d]", i),
-			Value: elem,
-		})
-	}
-}
-
-func (insp *Inspector) addArrayListElements(val vm.Value) {
-	defer func() { recover() }()
-	sizeVal := insp.vmInst.Send(val, "size", nil)
-	if !sizeVal.IsSmallInt() {
-		return
-	}
-	n := int(sizeVal.SmallInt())
-	if n > 50 {
-		n = 50
-	}
-	for i := 0; i < n; i++ {
-		elem := insp.vmInst.Send(val, "at:", []vm.Value{vm.FromSmallInt(int64(i))})
-		insp.entries = append(insp.entries, inspectorEntry{
-			Name:  fmt.Sprintf("[%d]", i),
-			Value: elem,
-		})
-	}
-}
-
-func (insp *Inspector) addDictionaryEntries(val vm.Value) {
-	defer func() { recover() }()
-	keysVal := insp.vmInst.Send(val, "keys", nil)
-	sizeVal := insp.vmInst.Send(keysVal, "size", nil)
-	if !sizeVal.IsSmallInt() {
-		return
-	}
-	n := int(sizeVal.SmallInt())
-	if n > 50 {
-		n = 50
-	}
-	for i := 0; i < n; i++ {
-		key := insp.vmInst.Send(keysVal, "at:", []vm.Value{vm.FromSmallInt(int64(i))})
-		keyStr := valuePrintString(insp.vmInst, key)
-		value := insp.vmInst.Send(val, "at:", []vm.Value{key})
-		insp.entries = append(insp.entries, inspectorEntry{
-			Name:  keyStr,
-			Value: value,
-		})
-	}
+	return 0
 }
 
 func (insp *Inspector) selectedValue() vm.Value {
@@ -266,6 +167,8 @@ func (insp *Inspector) selectedValue() vm.Value {
 	}
 	return insp.entries[insp.selIndex].Value
 }
+
+// --- Rendering ---
 
 func (insp *Inspector) render() {
 	f := insp.window.Content
@@ -284,10 +187,8 @@ func (insp *Inspector) render() {
 	listW := insp.listPaneW
 	valueX := listW + 1
 
-	// --- Left pane: variable names ---
+	// Left pane: self + entries
 	y := 4
-
-	// "self" entry
 	if insp.selIndex == -1 {
 		f.FillRectWH(selBG, 0, y, listW, lh)
 		display.DrawString(f, 8, y, "self", selFG)
@@ -295,11 +196,9 @@ func (insp *Inspector) render() {
 		display.DrawString(f, 8, y, "self", black)
 	}
 	y += lh
-
 	display.DrawHLine(f, 0, y, listW, gray)
 	y += 2
 
-	// Instance variables / entries
 	for i, entry := range insp.entries {
 		if y+lh > insp.listPaneH {
 			break
@@ -313,10 +212,9 @@ func (insp *Inspector) render() {
 		y += lh
 	}
 
-	// Vertical separator
 	display.DrawVLine(f, listW, 0, insp.listPaneH, gray)
 
-	// --- Right pane: selected value ---
+	// Right pane: selected value
 	selVal := insp.selectedValue()
 	className := valueClassName(insp.vmInst, selVal)
 	printStr := valuePrintString(insp.vmInst, selVal)
@@ -324,9 +222,7 @@ func (insp *Inspector) render() {
 	vy := 4
 	display.DrawString(f, valueX+8, vy, className, gray)
 	vy += lh
-
-	lines := wrapText(printStr, w-listW-20, font)
-	for _, line := range lines {
+	for _, line := range wrapText(printStr, w-listW-20, font) {
 		if vy+lh > insp.listPaneH {
 			break
 		}
@@ -334,13 +230,11 @@ func (insp *Inspector) render() {
 		vy += lh
 	}
 
-	// --- Horizontal separator ---
+	// Separator + eval pane
 	sepY := insp.listPaneH
 	display.DrawHLine(f, 0, sepY, w, gray)
-
 	display.DrawString(f, 4, sepY+2, "evaluate (in context of self):", gray)
 
-	// --- Eval pane ---
 	evalY := sepY + lh + 4
 	evalH := f.Height() - evalY
 	if insp.evalForm.Height() != evalH || insp.evalForm.Width() != w {
@@ -355,20 +249,20 @@ func (insp *Inspector) render() {
 	insp.window.MarkDirty()
 }
 
+// --- Click handling ---
+
 func (insp *Inspector) handleClick(lx, ly int) {
 	font := display.DefaultFont()
 	lh := font.LineHeight() + 2
-	listStartY := 4
 
 	if ly < insp.listPaneH && lx < insp.listPaneW {
-		// Check "self" row
-		if ly >= listStartY && ly < listStartY+lh {
+		y := 4
+		if ly >= y && ly < y+lh {
 			insp.selIndex = -1
 			insp.render()
 			return
 		}
-		y := listStartY + lh + 2 // skip separator
-
+		y += lh + 2
 		for i := range insp.entries {
 			if ly >= y && ly < y+lh {
 				insp.selIndex = i
@@ -384,12 +278,13 @@ func (insp *Inspector) handleClick(lx, ly int) {
 	}
 }
 
+// --- Eval ---
+
 func (insp *Inspector) doIt() {
 	source := getInspectorEvalSource(insp)
 	if source == "" {
 		return
 	}
-
 	defer func() {
 		if r := recover(); r != nil {
 			transcriptWrite(fmt.Sprintf("Inspector eval error: %v", r))
@@ -401,13 +296,11 @@ func (insp *Inspector) doIt() {
 		transcriptWrite("Compile error: " + err.Error())
 		return
 	}
-
 	_, execErr := app.vm.ExecuteSafe(method, insp.object, nil)
 	if execErr != nil {
 		transcriptWrite("Error: " + execErr.Error())
 		return
 	}
-
 	insp.buildEntries()
 	insp.render()
 }
@@ -417,7 +310,6 @@ func (insp *Inspector) printIt() {
 	if source == "" {
 		return
 	}
-
 	defer func() {
 		if r := recover(); r != nil {
 			transcriptWrite(fmt.Sprintf("Inspector eval error: %v", r))
@@ -429,13 +321,11 @@ func (insp *Inspector) printIt() {
 		transcriptWrite("Compile error: " + err.Error())
 		return
 	}
-
 	result, execErr := app.vm.ExecuteSafe(method, insp.object, nil)
 	if execErr != nil {
 		transcriptWrite("Error: " + execErr.Error())
 		return
 	}
-
 	ps := valuePrintString(app.vm, result)
 	cursor := insp.evalEditor.Cursor()
 	insp.evalEditor.SetCursor(cursor)
@@ -444,8 +334,7 @@ func (insp *Inspector) printIt() {
 }
 
 func (insp *Inspector) inspectSelected() {
-	val := insp.selectedValue()
-	openInspector(insp.vmInst, val)
+	openInspector(insp.vmInst, insp.selectedValue())
 }
 
 func getInspectorEvalSource(insp *Inspector) string {
@@ -495,9 +384,8 @@ func wrapText(text string, maxW int, font *display.Font) []string {
 }
 
 func valueClassName(vmInst *vm.VM, val vm.Value) string {
-	defer func() { recover() }()
-	result := vmInst.Send(val, "class", nil)
-	nameResult := vmInst.Send(result, "name", nil)
+	result := safeSend(vmInst, val, "class", nil)
+	nameResult := safeSend(vmInst, result, "name", nil)
 	if nameResult.IsSymbol() {
 		return vmInst.Symbols.Name(nameResult.SymbolID())
 	}
@@ -513,11 +401,4 @@ func shortDescription(vmInst *vm.VM, val vm.Value) string {
 		return ps[:40] + "..."
 	}
 	return ps
-}
-
-func boolStr(b bool) string {
-	if b {
-		return "true"
-	}
-	return "false"
 }
