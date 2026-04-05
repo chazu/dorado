@@ -1,17 +1,47 @@
 package display
 
 import (
+	"strings"
+
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-// TextEditor is an editable text pane that renders into a Form.
+// undoEntry records a state for undo/redo.
+type undoEntry struct {
+	text   string
+	cursor CursorPos
+}
+
+// TextEditor is an editable text pane with Emacs-style keybindings.
+//
+// Keybindings:
+//
+//	C-space    Set mark (start selection)
+//	C-g        Cancel mark / deselect
+//	C-a        Beginning of line
+//	C-e        End of line
+//	C-p        Previous line
+//	C-n        Next line
+//	C-f        Forward character
+//	C-b        Backward character
+//	C-d        Delete character forward
+//	C-h        Delete character backward (backspace)
+//	C-k        Kill to end of line (into kill ring)
+//	C-y        Yank (paste from kill ring)
+//	C-w        Kill region (cut selection into kill ring)
+//	M-w        Copy region (copy selection into kill ring)
+//	C-/        Undo
+//	C-z        Undo
+//	C-shift-z  Redo
+//	C-x C-s    (handled by window — Accept/Save)
+//	Cmd+C/X/V  Also supported for macOS clipboard compat
 type TextEditor struct {
 	Buffer *TextBuffer
 	Form   *Form
 
 	cursor   CursorPos
-	selStart CursorPos // anchor of selection
-	hasSel   bool
+	mark     CursorPos // Emacs mark
+	markSet  bool      // whether mark is active
 
 	scrollY   int        // first visible line
 	scrollbar *Scrollbar // vertical scrollbar
@@ -20,19 +50,32 @@ type TextEditor struct {
 	blinkTick int
 	blinkOn   bool
 
+	// Kill ring (Emacs-style)
+	killRing     []string
+	killRingIdx  int
+	lastWasKill  bool // for appending consecutive kills
+
+	// Undo/redo
+	undoStack []undoEntry
+	redoStack []undoEntry
+	undoGroup bool // suppress saving during undo/redo
+
+	// Mouse drag state
+	dragging bool
+
 	// Appearance
 	PadX     int
 	PadY     int
 	TabWidth int
 
 	// Callbacks
-	OnChange func(text string) // called after any edit
+	OnChange func(text string)
 }
 
 // NewTextEditor creates a text editor that renders into the given Form.
 func NewTextEditor(f *Form, text string) *TextEditor {
 	sb := NewScrollbar(f.Width()-scrollbarWidth, 0, f.Height())
-	return &TextEditor{
+	te := &TextEditor{
 		Buffer:    NewTextBuffer(text),
 		Form:      f,
 		scrollbar: sb,
@@ -41,6 +84,8 @@ func NewTextEditor(f *Form, text string) *TextEditor {
 		PadY:      4,
 		TabWidth:  4,
 	}
+	te.saveUndo()
+	return te
 }
 
 // textAreaWidth returns the width available for text (excluding scrollbar).
@@ -51,38 +96,120 @@ func (te *TextEditor) textAreaWidth() int {
 // Cursor returns the current cursor position.
 func (te *TextEditor) Cursor() CursorPos { return te.cursor }
 
-// SetCursor moves the cursor and clears selection.
+// SetCursor moves the cursor and deactivates the mark.
 func (te *TextEditor) SetCursor(pos CursorPos) {
 	te.cursor = te.Buffer.Clamp(pos)
-	te.hasSel = false
+	te.markSet = false
 }
 
-// SelectedText returns the currently selected text, or "".
+// SelectedText returns the text between mark and cursor, or "".
 func (te *TextEditor) SelectedText() string {
-	if !te.hasSel {
+	if !te.markSet {
 		return ""
 	}
-	return te.Buffer.Selection(te.selStart, te.cursor)
+	return te.Buffer.Selection(te.mark, te.cursor)
 }
 
 // Text returns the full buffer text.
 func (te *TextEditor) Text() string { return te.Buffer.Text() }
 
-// SetText replaces the buffer content and resets cursor.
+// SetText replaces the buffer content and resets state.
 func (te *TextEditor) SetText(text string) {
 	te.Buffer.SetText(text)
 	te.cursor = CursorPos{0, 0}
-	te.hasSel = false
+	te.markSet = false
 	te.scrollY = 0
+	te.undoStack = nil
+	te.redoStack = nil
+	te.saveUndo()
 }
 
-// visibleLines returns the number of text lines that fit in the form.
+// --- Undo / Redo ---
+
+func (te *TextEditor) saveUndo() {
+	if te.undoGroup {
+		return
+	}
+	entry := undoEntry{text: te.Buffer.Text(), cursor: te.cursor}
+	// Don't save duplicate states
+	if len(te.undoStack) > 0 && te.undoStack[len(te.undoStack)-1].text == entry.text {
+		return
+	}
+	te.undoStack = append(te.undoStack, entry)
+	// Limit undo history
+	if len(te.undoStack) > 200 {
+		te.undoStack = te.undoStack[len(te.undoStack)-200:]
+	}
+	te.redoStack = nil
+}
+
+func (te *TextEditor) undo() {
+	if len(te.undoStack) <= 1 {
+		return
+	}
+	// Push current state to redo
+	te.redoStack = append(te.redoStack, te.undoStack[len(te.undoStack)-1])
+	te.undoStack = te.undoStack[:len(te.undoStack)-1]
+
+	entry := te.undoStack[len(te.undoStack)-1]
+	te.undoGroup = true
+	te.Buffer.SetText(entry.text)
+	te.cursor = te.Buffer.Clamp(entry.cursor)
+	te.undoGroup = false
+	te.markSet = false
+	te.ensureCursorVisible()
+	te.fireChange()
+}
+
+func (te *TextEditor) redo() {
+	if len(te.redoStack) == 0 {
+		return
+	}
+	entry := te.redoStack[len(te.redoStack)-1]
+	te.redoStack = te.redoStack[:len(te.redoStack)-1]
+	te.undoStack = append(te.undoStack, entry)
+
+	te.undoGroup = true
+	te.Buffer.SetText(entry.text)
+	te.cursor = te.Buffer.Clamp(entry.cursor)
+	te.undoGroup = false
+	te.markSet = false
+	te.ensureCursorVisible()
+	te.fireChange()
+}
+
+// --- Kill ring ---
+
+func (te *TextEditor) killPush(text string) {
+	if te.lastWasKill && len(te.killRing) > 0 {
+		// Append to last kill
+		te.killRing[len(te.killRing)-1] += text
+	} else {
+		te.killRing = append(te.killRing, text)
+		if len(te.killRing) > 30 {
+			te.killRing = te.killRing[1:]
+		}
+	}
+	te.killRingIdx = len(te.killRing) - 1
+	// Also set the clipboard for OS interop
+	ClipboardSet(te.killRing[te.killRingIdx])
+}
+
+func (te *TextEditor) yank() string {
+	if len(te.killRing) == 0 {
+		// Fall back to clipboard
+		return ClipboardGet()
+	}
+	return te.killRing[te.killRingIdx]
+}
+
+// --- Visibility ---
+
 func (te *TextEditor) visibleLines() int {
 	lh := DefaultFont().LineHeight()
 	return (te.Form.Height() - te.PadY*2) / lh
 }
 
-// ensureCursorVisible scrolls to keep cursor in view.
 func (te *TextEditor) ensureCursorVisible() {
 	vis := te.visibleLines()
 	if vis <= 0 {
@@ -96,12 +223,18 @@ func (te *TextEditor) ensureCursorVisible() {
 	}
 }
 
+// --- Event handling ---
+
 // HandleEvent processes an input event. Returns true if consumed.
 func (te *TextEditor) HandleEvent(e Event) bool {
 	switch e.Type {
 	case EventKeyChar:
-		// Don't insert characters when Cmd/Ctrl is held (those are shortcuts)
-		if isCmdOrCtrl() {
+		// Don't insert when Ctrl is held (those are Emacs bindings)
+		if ebiten.IsKeyPressed(ebiten.KeyControl) {
+			return false
+		}
+		// Don't insert when Cmd is held (those are shortcuts)
+		if ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight) {
 			return false
 		}
 		te.insertChar(e.Char)
@@ -110,7 +243,7 @@ func (te *TextEditor) HandleEvent(e Event) bool {
 		return te.handleKey(e.Key)
 	case EventMouseDown:
 		if e.Button == ButtonLeft {
-			return true // mouse clicks handled via HandleClickLocal from window manager
+			return true
 		}
 	}
 	return false
@@ -120,66 +253,224 @@ func (te *TextEditor) insertChar(ch rune) {
 	if ch == '\r' {
 		ch = '\n'
 	}
-	if te.hasSel {
-		te.deleteSelection()
+	if te.markSet {
+		te.deleteRegion()
 	}
 	s := string(ch)
 	if ch == '\t' {
-		s = "    " // expand tabs
+		s = strings.Repeat(" ", te.TabWidth)
 	}
 	te.cursor = te.Buffer.Insert(te.cursor, s)
-	te.hasSel = false
+	te.markSet = false
+	te.lastWasKill = false
 	te.ensureCursorVisible()
+	te.saveUndo()
 	te.fireChange()
 }
 
-func (te *TextEditor) deleteSelection() {
-	if !te.hasSel {
+func (te *TextEditor) deleteRegion() {
+	if !te.markSet {
 		return
 	}
-	te.cursor = te.Buffer.Delete(te.selStart, te.cursor)
-	te.hasSel = false
+	te.cursor = te.Buffer.Delete(te.mark, te.cursor)
+	te.markSet = false
 }
 
 func (te *TextEditor) handleKey(key int) bool {
 	k := ebiten.Key(key)
+	ctrl := ebiten.IsKeyPressed(ebiten.KeyControl)
+	cmd := ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight)
 	shift := ebiten.IsKeyPressed(ebiten.KeyShift)
 
+	// --- Emacs Ctrl bindings ---
+	if ctrl {
+		switch k {
+		case ebiten.KeySpace:
+			// C-space: set mark
+			te.mark = te.cursor
+			te.markSet = true
+			return true
+
+		case ebiten.KeyG:
+			// C-g: cancel mark
+			te.markSet = false
+			return true
+
+		case ebiten.KeyA:
+			// C-a: beginning of line
+			te.cursor.Col = 0
+			te.lastWasKill = false
+			te.ensureCursorVisible()
+			return true
+
+		case ebiten.KeyE:
+			// C-e: end of line
+			te.cursor.Col = len([]rune(te.Buffer.Line(te.cursor.Line)))
+			te.lastWasKill = false
+			te.ensureCursorVisible()
+			return true
+
+		case ebiten.KeyP:
+			// C-p: previous line
+			if te.cursor.Line > 0 {
+				te.cursor.Line--
+				te.cursor = te.Buffer.Clamp(te.cursor)
+			}
+			te.lastWasKill = false
+			te.ensureCursorVisible()
+			return true
+
+		case ebiten.KeyN:
+			// C-n: next line
+			if te.cursor.Line < te.Buffer.LineCount()-1 {
+				te.cursor.Line++
+				te.cursor = te.Buffer.Clamp(te.cursor)
+			}
+			te.lastWasKill = false
+			te.ensureCursorVisible()
+			return true
+
+		case ebiten.KeyF:
+			// C-f: forward character
+			te.moveForward()
+			te.lastWasKill = false
+			return true
+
+		case ebiten.KeyB:
+			// C-b: backward character
+			te.moveBackward()
+			te.lastWasKill = false
+			return true
+
+		case ebiten.KeyD:
+			// C-d: delete character forward
+			te.deleteForward()
+			te.lastWasKill = false
+			return true
+
+		case ebiten.KeyH:
+			// C-h: delete character backward (backspace)
+			te.deleteBackward()
+			te.lastWasKill = false
+			return true
+
+		case ebiten.KeyK:
+			// C-k: kill to end of line
+			te.killLine()
+			return true
+
+		case ebiten.KeyY:
+			// C-y: yank
+			text := te.yank()
+			if text != "" {
+				if te.markSet {
+					te.deleteRegion()
+				}
+				te.cursor = te.Buffer.Insert(te.cursor, text)
+				te.markSet = false
+				te.ensureCursorVisible()
+				te.saveUndo()
+				te.fireChange()
+			}
+			te.lastWasKill = false
+			return true
+
+		case ebiten.KeyW:
+			// C-w: kill region (cut)
+			if te.markSet {
+				text := te.Buffer.Selection(te.mark, te.cursor)
+				te.killPush(text)
+				te.deleteRegion()
+				te.ensureCursorVisible()
+				te.saveUndo()
+				te.fireChange()
+			}
+			te.lastWasKill = false
+			return true
+
+		case ebiten.KeySlash:
+			// C-/: undo
+			te.undo()
+			te.lastWasKill = false
+			return true
+
+		case ebiten.KeyZ:
+			// C-z: undo, C-shift-z: redo
+			if shift {
+				te.redo()
+			} else {
+				te.undo()
+			}
+			te.lastWasKill = false
+			return true
+		}
+	}
+
+	// --- Alt/Meta bindings ---
+	if ebiten.IsKeyPressed(ebiten.KeyAlt) {
+		switch k {
+		case ebiten.KeyW:
+			// M-w: copy region
+			if te.markSet {
+				text := te.Buffer.Selection(te.mark, te.cursor)
+				te.killPush(text)
+			}
+			te.lastWasKill = false
+			return true
+
+		case ebiten.KeyF:
+			// M-f: forward word
+			te.moveForwardWord()
+			te.lastWasKill = false
+			return true
+
+		case ebiten.KeyB:
+			// M-b: backward word
+			te.moveBackwardWord()
+			te.lastWasKill = false
+			return true
+		}
+	}
+
+	// --- Cmd bindings (macOS compat) ---
+	if cmd {
+		switch k {
+		case ebiten.KeyC:
+			te.Copy()
+			return true
+		case ebiten.KeyX:
+			te.Cut()
+			return true
+		case ebiten.KeyV:
+			te.Paste()
+			return true
+		case ebiten.KeyA:
+			// Cmd+A: select all (set mark at beginning, cursor at end)
+			te.mark = CursorPos{0, 0}
+			lastLine := te.Buffer.LineCount() - 1
+			te.cursor = CursorPos{lastLine, len([]rune(te.Buffer.Line(lastLine)))}
+			te.markSet = true
+			return true
+		case ebiten.KeyZ:
+			if shift {
+				te.redo()
+			} else {
+				te.undo()
+			}
+			return true
+		}
+	}
+
+	// --- Standard keys ---
 	switch k {
 	case ebiten.KeyBackspace:
-		if te.hasSel {
-			te.deleteSelection()
-		} else if te.cursor.Col > 0 {
-			prev := CursorPos{te.cursor.Line, te.cursor.Col - 1}
-			te.cursor = te.Buffer.Delete(prev, te.cursor)
-		} else if te.cursor.Line > 0 {
-			// Join with previous line
-			prevLine := te.cursor.Line - 1
-			prevCol := len([]rune(te.Buffer.Line(prevLine)))
-			prev := CursorPos{prevLine, prevCol}
-			te.cursor = te.Buffer.Delete(prev, te.cursor)
-		}
-		te.hasSel = false
-		te.ensureCursorVisible()
-		te.fireChange()
+		te.deleteBackward()
+		te.lastWasKill = false
 		return true
 
 	case ebiten.KeyDelete:
-		if te.hasSel {
-			te.deleteSelection()
-		} else {
-			lineLen := len([]rune(te.Buffer.Line(te.cursor.Line)))
-			if te.cursor.Col < lineLen {
-				next := CursorPos{te.cursor.Line, te.cursor.Col + 1}
-				te.Buffer.Delete(te.cursor, next)
-			} else if te.cursor.Line < te.Buffer.LineCount()-1 {
-				next := CursorPos{te.cursor.Line + 1, 0}
-				te.Buffer.Delete(te.cursor, next)
-			}
-		}
-		te.hasSel = false
-		te.ensureCursorVisible()
-		te.fireChange()
+		te.deleteForward()
+		te.lastWasKill = false
 		return true
 
 	case ebiten.KeyEnter, ebiten.KeyNumpadEnter:
@@ -187,104 +478,171 @@ func (te *TextEditor) handleKey(key int) bool {
 		return true
 
 	case ebiten.KeyLeft:
-		te.startSelIfShift(shift)
-		if te.cursor.Col > 0 {
-			te.cursor.Col--
-		} else if te.cursor.Line > 0 {
-			te.cursor.Line--
-			te.cursor.Col = len([]rune(te.Buffer.Line(te.cursor.Line)))
-		}
-		if !shift {
-			te.hasSel = false
-		}
-		te.ensureCursorVisible()
+		te.moveBackward()
+		te.lastWasKill = false
 		return true
 
 	case ebiten.KeyRight:
-		te.startSelIfShift(shift)
-		lineLen := len([]rune(te.Buffer.Line(te.cursor.Line)))
-		if te.cursor.Col < lineLen {
-			te.cursor.Col++
-		} else if te.cursor.Line < te.Buffer.LineCount()-1 {
-			te.cursor.Line++
-			te.cursor.Col = 0
-		}
-		if !shift {
-			te.hasSel = false
-		}
-		te.ensureCursorVisible()
+		te.moveForward()
+		te.lastWasKill = false
 		return true
 
 	case ebiten.KeyUp:
-		te.startSelIfShift(shift)
 		if te.cursor.Line > 0 {
 			te.cursor.Line--
 			te.cursor = te.Buffer.Clamp(te.cursor)
 		}
-		if !shift {
-			te.hasSel = false
-		}
+		te.lastWasKill = false
 		te.ensureCursorVisible()
 		return true
 
 	case ebiten.KeyDown:
-		te.startSelIfShift(shift)
 		if te.cursor.Line < te.Buffer.LineCount()-1 {
 			te.cursor.Line++
 			te.cursor = te.Buffer.Clamp(te.cursor)
 		}
-		if !shift {
-			te.hasSel = false
-		}
+		te.lastWasKill = false
 		te.ensureCursorVisible()
 		return true
 
 	case ebiten.KeyHome:
-		te.startSelIfShift(shift)
 		te.cursor.Col = 0
-		if !shift {
-			te.hasSel = false
-		}
+		te.ensureCursorVisible()
 		return true
 
 	case ebiten.KeyEnd:
-		te.startSelIfShift(shift)
 		te.cursor.Col = len([]rune(te.Buffer.Line(te.cursor.Line)))
-		if !shift {
-			te.hasSel = false
-		}
+		te.ensureCursorVisible()
 		return true
-
-	case ebiten.KeyA:
-		if isCmdOrCtrl() {
-			// Select all
-			te.selStart = CursorPos{0, 0}
-			lastLine := te.Buffer.LineCount() - 1
-			te.cursor = CursorPos{lastLine, len([]rune(te.Buffer.Line(lastLine)))}
-			te.hasSel = true
-			return true
-		}
-
-	case ebiten.KeyC:
-		if isCmdOrCtrl() {
-			te.Copy()
-			return true
-		}
-
-	case ebiten.KeyX:
-		if isCmdOrCtrl() {
-			te.Cut()
-			return true
-		}
-
-	case ebiten.KeyV:
-		if isCmdOrCtrl() {
-			te.Paste()
-			return true
-		}
 	}
+
 	return false
 }
+
+// --- Movement helpers ---
+
+func (te *TextEditor) moveForward() {
+	lineLen := len([]rune(te.Buffer.Line(te.cursor.Line)))
+	if te.cursor.Col < lineLen {
+		te.cursor.Col++
+	} else if te.cursor.Line < te.Buffer.LineCount()-1 {
+		te.cursor.Line++
+		te.cursor.Col = 0
+	}
+	te.ensureCursorVisible()
+}
+
+func (te *TextEditor) moveBackward() {
+	if te.cursor.Col > 0 {
+		te.cursor.Col--
+	} else if te.cursor.Line > 0 {
+		te.cursor.Line--
+		te.cursor.Col = len([]rune(te.Buffer.Line(te.cursor.Line)))
+	}
+	te.ensureCursorVisible()
+}
+
+func (te *TextEditor) moveForwardWord() {
+	runes := []rune(te.Buffer.Line(te.cursor.Line))
+	col := te.cursor.Col
+	// Skip non-word chars
+	for col < len(runes) && !isWordChar(runes[col]) {
+		col++
+	}
+	// Skip word chars
+	for col < len(runes) && isWordChar(runes[col]) {
+		col++
+	}
+	te.cursor.Col = col
+	te.ensureCursorVisible()
+}
+
+func (te *TextEditor) moveBackwardWord() {
+	runes := []rune(te.Buffer.Line(te.cursor.Line))
+	col := te.cursor.Col
+	if col > len(runes) {
+		col = len(runes)
+	}
+	// Skip non-word chars backward
+	for col > 0 && !isWordChar(runes[col-1]) {
+		col--
+	}
+	// Skip word chars backward
+	for col > 0 && isWordChar(runes[col-1]) {
+		col--
+	}
+	te.cursor.Col = col
+	te.ensureCursorVisible()
+}
+
+func isWordChar(r rune) bool {
+	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '_'
+}
+
+// --- Editing helpers ---
+
+func (te *TextEditor) deleteBackward() {
+	if te.markSet {
+		text := te.Buffer.Selection(te.mark, te.cursor)
+		te.killPush(text)
+		te.deleteRegion()
+	} else if te.cursor.Col > 0 {
+		prev := CursorPos{te.cursor.Line, te.cursor.Col - 1}
+		te.cursor = te.Buffer.Delete(prev, te.cursor)
+	} else if te.cursor.Line > 0 {
+		prevLine := te.cursor.Line - 1
+		prevCol := len([]rune(te.Buffer.Line(prevLine)))
+		prev := CursorPos{prevLine, prevCol}
+		te.cursor = te.Buffer.Delete(prev, te.cursor)
+	}
+	te.markSet = false
+	te.ensureCursorVisible()
+	te.saveUndo()
+	te.fireChange()
+}
+
+func (te *TextEditor) deleteForward() {
+	if te.markSet {
+		text := te.Buffer.Selection(te.mark, te.cursor)
+		te.killPush(text)
+		te.deleteRegion()
+	} else {
+		lineLen := len([]rune(te.Buffer.Line(te.cursor.Line)))
+		if te.cursor.Col < lineLen {
+			next := CursorPos{te.cursor.Line, te.cursor.Col + 1}
+			te.Buffer.Delete(te.cursor, next)
+		} else if te.cursor.Line < te.Buffer.LineCount()-1 {
+			next := CursorPos{te.cursor.Line + 1, 0}
+			te.Buffer.Delete(te.cursor, next)
+		}
+	}
+	te.markSet = false
+	te.ensureCursorVisible()
+	te.saveUndo()
+	te.fireChange()
+}
+
+func (te *TextEditor) killLine() {
+	lineRunes := []rune(te.Buffer.Line(te.cursor.Line))
+	if te.cursor.Col < len(lineRunes) {
+		// Kill to end of line
+		end := CursorPos{te.cursor.Line, len(lineRunes)}
+		killed := te.Buffer.Selection(te.cursor, end)
+		te.killPush(killed)
+		te.Buffer.Delete(te.cursor, end)
+	} else if te.cursor.Line < te.Buffer.LineCount()-1 {
+		// At end of line: kill the newline (join with next line)
+		next := CursorPos{te.cursor.Line + 1, 0}
+		te.killPush("\n")
+		te.Buffer.Delete(te.cursor, next)
+	}
+	te.lastWasKill = true
+	te.ensureCursorVisible()
+	te.saveUndo()
+	te.fireChange()
+}
+
+// --- Clipboard compat (Cmd+C/X/V) ---
 
 func isCmdOrCtrl() bool {
 	return ebiten.IsKeyPressed(ebiten.KeyMetaLeft) || ebiten.IsKeyPressed(ebiten.KeyMetaRight) ||
@@ -293,76 +651,65 @@ func isCmdOrCtrl() bool {
 
 // Copy copies the selected text to the clipboard.
 func (te *TextEditor) Copy() {
-	if te.hasSel {
-		ClipboardSet(te.Buffer.Selection(te.selStart, te.cursor))
+	if te.markSet {
+		text := te.Buffer.Selection(te.mark, te.cursor)
+		te.killPush(text)
 	}
 }
 
 // Cut copies the selected text to the clipboard and deletes it.
 func (te *TextEditor) Cut() {
-	if te.hasSel {
-		ClipboardSet(te.Buffer.Selection(te.selStart, te.cursor))
-		te.deleteSelection()
+	if te.markSet {
+		text := te.Buffer.Selection(te.mark, te.cursor)
+		te.killPush(text)
+		te.deleteRegion()
 		te.ensureCursorVisible()
+		te.saveUndo()
 		te.fireChange()
 	}
 }
 
 // Paste inserts clipboard content at the cursor, replacing selection if any.
 func (te *TextEditor) Paste() {
-	text := ClipboardGet()
+	text := te.yank()
 	if text == "" {
 		return
 	}
-	if te.hasSel {
-		te.deleteSelection()
+	if te.markSet {
+		te.deleteRegion()
 	}
 	te.cursor = te.Buffer.Insert(te.cursor, text)
-	te.hasSel = false
+	te.markSet = false
 	te.ensureCursorVisible()
+	te.saveUndo()
 	te.fireChange()
 }
 
-func (te *TextEditor) startSelIfShift(shift bool) {
-	if shift && !te.hasSel {
-		te.selStart = te.cursor
-		te.hasSel = true
-	}
-}
+// --- Mouse handling ---
 
 // HandleClickLocal handles a click in editor-local coordinates.
 func (te *TextEditor) HandleClickLocal(localX, localY int, shift bool) {
-	// Check scrollbar first
 	if te.scrollbar.Contains(localX, localY) {
 		te.scrollbar.HandleClick(localX, localY)
 		te.scrollY = te.scrollbar.Offset
 		return
 	}
 
-	font := DefaultFont()
-	lh := font.LineHeight()
+	pos := te.posFromLocal(localX, localY)
 
-	line := (localY - te.PadY) / lh + te.scrollY
-	if line < 0 {
-		line = 0
-	}
-	if line >= te.Buffer.LineCount() {
-		line = te.Buffer.LineCount() - 1
-	}
-
-	// Find column by measuring character widths
-	col := te.colFromX(line, localX-te.PadX)
-
-	if shift {
-		if !te.hasSel {
-			te.selStart = te.cursor
-			te.hasSel = true
+	if shift || te.markSet {
+		// Extend selection
+		if !te.markSet {
+			te.mark = te.cursor
+			te.markSet = true
 		}
 	} else {
-		te.hasSel = false
+		te.markSet = false
 	}
 
-	te.cursor = te.Buffer.Clamp(CursorPos{Line: line, Col: col})
+	te.cursor = pos
+	te.dragging = true
+	te.lastWasKill = false
 }
 
 // HandleDragLocal handles a mouse drag in editor-local coordinates.
@@ -372,15 +719,34 @@ func (te *TextEditor) HandleDragLocal(localX, localY int) {
 		te.scrollY = te.scrollbar.Offset
 		return
 	}
+
+	if te.dragging {
+		pos := te.posFromLocal(localX, localY)
+		if !te.markSet {
+			te.mark = te.cursor
+			te.markSet = true
+		}
+		te.cursor = pos
+		te.ensureCursorVisible()
+	}
 }
 
 // HandleReleaseLocal handles mouse release.
 func (te *TextEditor) HandleReleaseLocal() {
 	te.scrollbar.HandleRelease()
+	te.dragging = false
 }
 
 // HandleDoubleClickLocal selects the word at the click position.
 func (te *TextEditor) HandleDoubleClickLocal(localX, localY int) {
+	pos := te.posFromLocal(localX, localY)
+	start, end := te.Buffer.WordAt(pos)
+	te.mark = CursorPos{Line: pos.Line, Col: start}
+	te.cursor = CursorPos{Line: pos.Line, Col: end}
+	te.markSet = start != end
+}
+
+func (te *TextEditor) posFromLocal(localX, localY int) CursorPos {
 	font := DefaultFont()
 	lh := font.LineHeight()
 
@@ -391,14 +757,8 @@ func (te *TextEditor) HandleDoubleClickLocal(localX, localY int) {
 	if line >= te.Buffer.LineCount() {
 		line = te.Buffer.LineCount() - 1
 	}
-
 	col := te.colFromX(line, localX-te.PadX)
-	pos := te.Buffer.Clamp(CursorPos{Line: line, Col: col})
-
-	start, end := te.Buffer.WordAt(pos)
-	te.selStart = CursorPos{Line: pos.Line, Col: start}
-	te.cursor = CursorPos{Line: pos.Line, Col: end}
-	te.hasSel = start != end
+	return te.Buffer.Clamp(CursorPos{Line: line, Col: col})
 }
 
 func (te *TextEditor) colFromX(line, px int) int {
@@ -425,22 +785,21 @@ func (te *TextEditor) fireChange() {
 	}
 }
 
+// --- Rendering ---
+
 // Render draws the text, selection, and cursor into the editor's Form.
 func (te *TextEditor) Render() {
 	f := te.Form
 	font := DefaultFont()
 	lh := font.LineHeight()
 
-	// Sync scrollbar state
 	te.scrollbar.SetRange(te.Buffer.LineCount(), te.visibleLines())
 	te.scrollbar.Offset = te.scrollY
 
-	// Clear to white
 	f.Fill(ColorRGB(255, 255, 255))
 
-	// Update blink
 	te.blinkTick++
-	if te.blinkTick >= 30 { // ~0.5s at 60fps
+	if te.blinkTick >= 30 {
 		te.blinkTick = 0
 		te.blinkOn = !te.blinkOn
 	}
@@ -451,8 +810,8 @@ func (te *TextEditor) Render() {
 
 	// Normalize selection range
 	var selMin, selMax CursorPos
-	if te.hasSel {
-		selMin, selMax = te.selStart, te.cursor
+	if te.markSet {
+		selMin, selMax = te.mark, te.cursor
 		if selMin.Line > selMax.Line || (selMin.Line == selMax.Line && selMin.Col > selMax.Col) {
 			selMin, selMax = selMax, selMin
 		}
@@ -463,12 +822,10 @@ func (te *TextEditor) Render() {
 		lineText := te.Buffer.Line(lineIdx)
 		y := te.PadY + i*lh
 
-		// Draw selection highlight for this line
-		if te.hasSel && lineIdx >= selMin.Line && lineIdx <= selMax.Line {
+		if te.markSet && lineIdx >= selMin.Line && lineIdx <= selMax.Line {
 			te.drawSelectionLine(f, lineIdx, y, lineText, selMin, selMax, selColor, lh)
 		}
 
-		// Draw text
 		DrawStringFont(f, te.PadX, y, lineText, black, font)
 	}
 
@@ -481,7 +838,6 @@ func (te *TextEditor) Render() {
 		}
 	}
 
-	// Draw scrollbar
 	te.scrollbar.Render(f)
 }
 

@@ -327,12 +327,19 @@ func (wm *WindowManager) handleMouseMove(e Event) bool {
 		wm.resizing.Resize(newW, newH)
 		return true
 	}
-	// Scrollbar drag
-	if wm.focused != nil && wm.focused.Editor != nil && wm.focused.Editor.scrollbar.IsDragging() {
-		_, ly := wm.focused.ScreenToContent(e.X, e.Y)
-		wm.focused.Editor.HandleDragLocal(e.X-wm.focused.X-wm.focused.contentX, ly)
-		wm.focused.MarkDirty()
-		return true
+	// Editor drag (scrollbar or text selection)
+	if wm.focused != nil && wm.focused.Editor != nil {
+		lx, ly := wm.focused.ScreenToContent(e.X, e.Y)
+		if wm.focused.Editor.scrollbar.IsDragging() {
+			wm.focused.Editor.HandleDragLocal(lx, ly)
+			wm.focused.MarkDirty()
+			return true
+		}
+		if wm.focused.Editor.dragging {
+			wm.focused.Editor.HandleDragLocal(lx, ly)
+			wm.focused.MarkDirty()
+			return true
+		}
 	}
 	return false
 }
