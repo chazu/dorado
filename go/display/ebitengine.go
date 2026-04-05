@@ -1,7 +1,6 @@
 package display
 
 import (
-	"image"
 	"sync"
 
 	"github.com/hajimehoshi/ebiten/v2"
@@ -9,41 +8,37 @@ import (
 )
 
 // EbitengineBackend implements DisplayBackend using Ebitengine.
-//
-// Usage:
-//
-//	screen := NewForm(1280, 960)
-//	backend := NewEbitengineBackend(screen)
-//	backend.OnUpdate = func() { /* draw into screen each frame */ }
-//	backend.Run() // blocks
 type EbitengineBackend struct {
 	screen   *Form
-	ebiImage *ebiten.Image // reused for uploading pixels
+	ebiImage *ebiten.Image
 
 	events  []Event
 	eventMu sync.Mutex
 
 	// OnUpdate is called once per frame before drawing.
-	// Use this to poll events, update state, and draw into the screen Form.
 	OnUpdate func()
 
-	width, height int
+	// Logical dimensions (match the screen Form)
+	logicalW, logicalH int
 }
 
 // NewEbitengineBackend creates a backend that displays the given screen Form.
 func NewEbitengineBackend(screen *Form) *EbitengineBackend {
 	return &EbitengineBackend{
-		screen: screen,
-		width:  screen.Width(),
-		height: screen.Height(),
+		screen:   screen,
+		logicalW: screen.Width(),
+		logicalH: screen.Height(),
 	}
 }
 
 // Run starts the Ebitengine game loop. This blocks until the window is closed.
 func (b *EbitengineBackend) Run() error {
-	ebiten.SetWindowSize(b.width, b.height)
+	// Set the window size to match logical size.
+	// On HiDPI displays, Ebitengine scales automatically.
+	ebiten.SetWindowSize(b.logicalW, b.logicalH)
 	ebiten.SetWindowTitle("Dorado")
-	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeEnabled)
+	// Disable resizing to avoid coordinate mismatch issues
+	ebiten.SetWindowResizingMode(ebiten.WindowResizingModeDisabled)
 	return ebiten.RunGame(b)
 }
 
@@ -58,24 +53,23 @@ func (b *EbitengineBackend) Update() error {
 }
 
 func (b *EbitengineBackend) Draw(screen *ebiten.Image) {
-	if b.ebiImage == nil || b.ebiImage.Bounds() != b.screen.Bounds() {
-		b.ebiImage = ebiten.NewImage(b.screen.Width(), b.screen.Height())
+	if b.ebiImage == nil {
+		b.ebiImage = ebiten.NewImage(b.logicalW, b.logicalH)
 	}
 	b.ebiImage.WritePixels(b.screen.Pix())
 	screen.DrawImage(b.ebiImage, nil)
 }
 
 func (b *EbitengineBackend) Layout(outsideWidth, outsideHeight int) (int, int) {
-	// Always return the screen Form's dimensions as the logical size.
-	// This prevents black bars when the OS window size differs.
-	return b.screen.Width(), b.screen.Height()
+	// Fixed logical size matching the screen Form.
+	return b.logicalW, b.logicalH
 }
 
 // --- DisplayBackend interface ---
 
 func (b *EbitengineBackend) Init(width, height int) error {
-	b.width = width
-	b.height = height
+	b.logicalW = width
+	b.logicalH = height
 	return nil
 }
 
@@ -106,18 +100,29 @@ func (b *EbitengineBackend) pollInput() {
 	b.eventMu.Lock()
 	defer b.eventMu.Unlock()
 
+	// CursorPosition returns coordinates in the logical (Layout) space,
+	// so they always match our Form's coordinate system.
 	mx, my := ebiten.CursorPosition()
 
-	// Mouse movement
-	if ebiten.CursorMode() != ebiten.CursorModeHidden {
-		// Only emit move events when position changes -- but for simplicity
-		// in this foundation layer, always emit. Consumers can debounce.
-		b.events = append(b.events, Event{
-			Type: EventMouseMove,
-			X:    mx,
-			Y:    my,
-		})
+	// Clamp to logical bounds
+	if mx < 0 {
+		mx = 0
 	}
+	if my < 0 {
+		my = 0
+	}
+	if mx >= b.logicalW {
+		mx = b.logicalW - 1
+	}
+	if my >= b.logicalH {
+		my = b.logicalH - 1
+	}
+
+	b.events = append(b.events, Event{
+		Type: EventMouseMove,
+		X:    mx,
+		Y:    my,
+	})
 
 	// Mouse buttons
 	for _, btn := range []ebiten.MouseButton{
@@ -126,6 +131,12 @@ func (b *EbitengineBackend) pollInput() {
 		ebiten.MouseButtonRight,
 	} {
 		magBtn := mouseButtonMap(btn)
+
+		// macOS: Ctrl+Left-click → treat as right-click
+		if btn == ebiten.MouseButtonLeft && ebiten.IsKeyPressed(ebiten.KeyControl) {
+			magBtn = ButtonRight
+		}
+
 		if inpututil.IsMouseButtonJustPressed(btn) {
 			b.events = append(b.events, Event{
 				Type:   EventMouseDown,
@@ -159,23 +170,10 @@ func (b *EbitengineBackend) pollInput() {
 	}
 
 	// Character input
-	chars := ebiten.AppendInputChars(nil)
-	for _, ch := range chars {
+	for _, ch := range ebiten.AppendInputChars(nil) {
 		b.events = append(b.events, Event{
 			Type: EventKeyChar,
 			Char: ch,
-		})
-	}
-
-	// Window resize
-	w, h := ebiten.WindowSize()
-	if w != b.width || h != b.height {
-		b.width = w
-		b.height = h
-		b.events = append(b.events, Event{
-			Type: EventWindowResize,
-			X:    w,
-			Y:    h,
 		})
 	}
 }
@@ -191,7 +189,3 @@ func mouseButtonMap(btn ebiten.MouseButton) int {
 	}
 	return 0
 }
-
-// Ensure the Layout uses the correct Form bounds when the screen is an
-// arbitrary size (e.g., after calling Init with different dimensions).
-var _ image.Image = (*image.RGBA)(nil) // compile-time check
